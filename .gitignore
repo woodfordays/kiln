@@ -1,0 +1,17 @@
+# Per-box settings: may hold HF_TOKEN and KILN_UI_PASSWORD. Copy .env.example instead.
+.env
+.env.bak
+
+# Runtime state: SQLite stats, run logs, Mesa shader cache. Created by scripts/setup-env.sh.
+data/
+
+# Local Python environment (development only; the image builds its own)
+.venv/
+__pycache__/
+*.py[cod]
+
+# Editors and OS
+.vscode/
+.idea/
+*.swp
+.DS_Store

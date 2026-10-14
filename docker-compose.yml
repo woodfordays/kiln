@@ -1,0 +1,31 @@
+services:
+  kiln:
+    build:
+      context: .
+      args:
+        LLAMA_CPP_REF: ${LLAMA_CPP_REF:-ff0dbb975e93a9a2899efa34bdd32d1c5cfbc183}
+    image: kiln:latest
+    container_name: kiln
+    restart: unless-stopped
+    # Run as you, so downloads in the models folder belong to you.
+    user: "${KILN_UID:-1000}:${KILN_GID:-1000}"
+    # The host's video and render groups own /dev/dri; `getent group video render` shows them.
+    group_add:
+      - "${VIDEO_GID:-44}"
+      - "${RENDER_GID:-993}"
+    devices:
+      - /dev/dri:/dev/dri
+    ports:
+      - "${KILN_BIND:-0.0.0.0}:${KILN_UI_PORT:-8090}:8090"   # control panel
+      - "${KILN_BIND:-0.0.0.0}:${KILN_API_PORT:-8080}:8080"  # OpenAI-compatible API (recorded)
+    environment:
+      KILN_PUBLIC_UI_PORT: ${KILN_UI_PORT:-8090}
+      KILN_PUBLIC_API_PORT: ${KILN_API_PORT:-8080}
+      KILN_UI_PASSWORD: ${KILN_UI_PASSWORD:-}
+      HF_TOKEN: ${HF_TOKEN:-}
+    volumes:
+      - ${MODELS_DIR:-/opt/models}:/models
+      - ./data:/data
+    ulimits:
+      memlock: -1  # lets --mlock pin model weights
+    stop_grace_period: 30s

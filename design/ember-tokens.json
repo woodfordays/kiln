@@ -1,0 +1,744 @@
+{
+  "name": "Ember",
+  "version": 1,
+  "color": {
+    "note": "Dark first. Warm charcoal neutrals, one ember accent, status hues that never ride on hue alone. Each text token names the grounds it is checked on, in both themes.",
+    "themes": [
+      {
+        "id": "dark",
+        "name": "Dark"
+      },
+      {
+        "id": "light",
+        "name": "Light"
+      }
+    ],
+    "tokens": [
+      {
+        "name": "ember-50",
+        "value": "#fff5eb",
+        "usage": "Ramp step, palest glow. Sequential fills nearest zero in the light theme; never text."
+      },
+      {
+        "name": "ember-100",
+        "value": "#ffe8d6",
+        "usage": "Ramp step. The light theme’s ember-soft."
+      },
+      {
+        "name": "ember-200",
+        "value": "#ffd2b3",
+        "usage": "Ramp step. Sequential and ordinal fills; never text on light grounds."
+      },
+      {
+        "name": "ember-300",
+        "value": "#ffb486",
+        "usage": "Ramp step. Light end of the dark theme’s ordinal ramp."
+      },
+      {
+        "name": "ember-400",
+        "value": "#ff8c4f",
+        "usage": "Ramp step. Dark theme ember-text, ember-hover and focus color; light end of the light theme’s ordinal ramp."
+      },
+      {
+        "name": "ember-500",
+        "value": "#fc6012",
+        "usage": "The brand ember. Dark theme primary fill and the cover’s lead block."
+      },
+      {
+        "name": "ember-600",
+        "value": "#d14500",
+        "usage": "Light theme primary fill (white label 4.6:1) and light theme focus color."
+      },
+      {
+        "name": "ember-700",
+        "value": "#af3302",
+        "usage": "Light theme ember-text and ember-hover."
+      },
+      {
+        "name": "ember-800",
+        "value": "#8a260b",
+        "usage": "Ramp step. Dark end of ordinal and sequential ramps (dark theme ordinal ramp starts here)."
+      },
+      {
+        "name": "ember-900",
+        "value": "#631c0d",
+        "usage": "Ramp step. Dark end of the light theme’s sequential ramp."
+      },
+      {
+        "name": "ember-950",
+        "value": "#3f1209",
+        "usage": "Ramp step, a banked coal. The dark theme’s ember-soft."
+      },
+      {
+        "name": "bg",
+        "value": {
+          "dark": "#0f0c0a",
+          "light": "#faf7f4"
+        },
+        "usage": "App canvas: page background, the side nav and the gutters between cards."
+      },
+      {
+        "name": "surface",
+        "value": {
+          "dark": "#161310",
+          "light": "#ffffff"
+        },
+        "usage": "The working plane: cards, panels, table bodies, the top bar. Chart colors are validated on it."
+      },
+      {
+        "name": "surface-raised",
+        "value": {
+          "dark": "#1e1a17",
+          "light": "#ffffff"
+        },
+        "usage": "Floating layers (menus, popovers, toasts, dialogs) and the secondary button fill."
+      },
+      {
+        "name": "surface-sunken",
+        "value": {
+          "dark": "#110e0c",
+          "light": "#f5f2ef"
+        },
+        "usage": "Wells: text fields, selects, code blocks and the segmented-control track."
+      },
+      {
+        "name": "surface-hover",
+        "value": {
+          "dark": "#26211e",
+          "light": "#f1edea"
+        },
+        "usage": "Hover fill for table rows, nav items and ghost buttons on bg or surface."
+      },
+      {
+        "name": "surface-active",
+        "value": {
+          "dark": "#2f2a27",
+          "light": "#e8e3df"
+        },
+        "usage": "Pressed and neutral-selected fill; progress and switch tracks; avatar ground."
+      },
+      {
+        "name": "line",
+        "value": {
+          "dark": "#2f2b27",
+          "light": "#e4dfda"
+        },
+        "usage": "Hairlines: dividers, card and table borders, chart gridlines, secondary button edge. Decorative, never the only boundary of a field."
+      },
+      {
+        "name": "line-strong",
+        "value": {
+          "dark": "#716a65",
+          "light": "#8d8681"
+        },
+        "usage": "Edges that identify a control: text field, select, checkbox and switch outlines; chart baselines. At least 3:1 on bg, surface, surface-raised and surface-sunken in both themes."
+      },
+      {
+        "name": "ink",
+        "value": {
+          "dark": "#f5f0ec",
+          "light": "#1e1814"
+        },
+        "usage": "Primary text and icons on bg, surface, surface-raised, surface-sunken, surface-hover and surface-active (12.5:1 or more in both themes)."
+      },
+      {
+        "name": "ink-muted",
+        "value": {
+          "dark": "#c4bcb6",
+          "light": "#5d554f"
+        },
+        "usage": "Secondary text (descriptions, table headers, inactive tabs and nav labels) on every surface, surface-active included (5.7:1 or more)."
+      },
+      {
+        "name": "ink-subtle",
+        "value": {
+          "dark": "#9d958f",
+          "light": "#716963"
+        },
+        "usage": "Tertiary text (placeholders, timestamps, axis labels, captions) on bg, surface, surface-raised, surface-sunken and surface-hover (4.6:1 or more). Not on surface-active."
+      },
+      {
+        "name": "ink-disabled",
+        "value": {
+          "dark": "#5f5a55",
+          "light": "#ada6a2"
+        },
+        "usage": "Disabled labels and icons only. Deliberately under 4.5:1; WCAG exempts disabled controls."
+      },
+      {
+        "name": "ember",
+        "value": {
+          "dark": "{ember-500}",
+          "light": "{ember-600}"
+        },
+        "usage": "The one accent fill: primary button, checked checkbox, switch on, progress fill, selected markers. Label it with on-ember. At most one ember-filled action per view."
+      },
+      {
+        "name": "ember-hover",
+        "value": {
+          "dark": "{ember-400}",
+          "light": "{ember-700}"
+        },
+        "usage": "Hover state of an ember fill: lighter in the dark theme, deeper in the light. Still labelled with on-ember."
+      },
+      {
+        "name": "on-ember",
+        "value": {
+          "dark": "#170c09",
+          "light": "#ffffff"
+        },
+        "usage": "Text and icons on ember and ember-hover (4.6:1 or more): near-black in the dark theme, white in the light."
+      },
+      {
+        "name": "ember-text",
+        "value": {
+          "dark": "{ember-400}",
+          "light": "{ember-700}"
+        },
+        "usage": "Ember as text or icon (active nav icon, selected value, eyebrow accent) on bg, surface, surface-raised, surface-hover and ember-soft (5.3:1 or more). Links stay ink with an ember underline."
+      },
+      {
+        "name": "ember-soft",
+        "value": {
+          "dark": "{ember-950}",
+          "light": "{ember-100}"
+        },
+        "usage": "Tinted ground behind ember-text: active nav item, ember badge, selected row marker."
+      },
+      {
+        "name": "focus",
+        "value": {
+          "dark": "{ember-400}",
+          "light": "{ember-600}"
+        },
+        "usage": "Keyboard focus color, used through the focus-ring shadow. 3:1 or more on every surface in both themes."
+      },
+      {
+        "name": "success",
+        "value": {
+          "dark": "#3bd5be",
+          "light": "#007567"
+        },
+        "usage": "Healthy, complete, up-is-good deltas: text and icons on bg, surface, surface-raised and success-soft (4.9:1 or more). Teal, off the red–green axis; always beside an icon or word."
+      },
+      {
+        "name": "success-soft",
+        "value": {
+          "dark": "#0b2621",
+          "light": "#dcf7f1"
+        },
+        "usage": "Ground for success badges and alerts."
+      },
+      {
+        "name": "warning",
+        "value": {
+          "dark": "#fdc146",
+          "light": "#995d0c"
+        },
+        "usage": "Degraded or needs attention: text and icons on bg, surface, surface-raised and warning-soft (4.7:1 or more). Always with the triangle icon or a word."
+      },
+      {
+        "name": "warning-soft",
+        "value": {
+          "dark": "#2d1f0a",
+          "light": "#fff1d1"
+        },
+        "usage": "Ground for warning badges and alerts."
+      },
+      {
+        "name": "danger",
+        "value": {
+          "dark": "#fd7678",
+          "light": "#be2035"
+        },
+        "usage": "Failed, invalid, destructive, down-is-bad deltas: text and icons on bg, surface, surface-raised and danger-soft (5.3:1 or more). It sits near ember in hue, so it always carries the alert icon or a word."
+      },
+      {
+        "name": "danger-soft",
+        "value": {
+          "dark": "#361717",
+          "light": "#ffebea"
+        },
+        "usage": "Ground for danger badges, alerts and field errors."
+      },
+      {
+        "name": "danger-solid",
+        "value": {
+          "dark": "#d42834",
+          "light": "#c51c2b"
+        },
+        "usage": "Fill of the destructive button (Delete, Revoke). Never placed beside an ember primary."
+      },
+      {
+        "name": "on-danger",
+        "value": {
+          "dark": "#ffffff",
+          "light": "#ffffff"
+        },
+        "usage": "Label on danger-solid (5:1 or more)."
+      },
+      {
+        "name": "info",
+        "value": {
+          "dark": "#73bdfa",
+          "light": "#1969b4"
+        },
+        "usage": "Neutral notices, tips and doc links: text and icons on bg, surface, surface-raised and info-soft (4.9:1 or more)."
+      },
+      {
+        "name": "info-soft",
+        "value": {
+          "dark": "#122232",
+          "light": "#e5f2ff"
+        },
+        "usage": "Ground for info badges and alerts."
+      },
+      {
+        "name": "scrim",
+        "value": {
+          "dark": "#0a0807b8",
+          "light": "#1e181473"
+        },
+        "usage": "Overlay behind a modal dialog."
+      },
+      {
+        "name": "chart-1",
+        "value": {
+          "dark": "#f05810",
+          "light": "#e14e00"
+        },
+        "usage": "Series slot 1 (ember). The lead series; sparkline current-period accent. Assign slots in order, never cycled; marks only, labels stay in ink tokens. Validated on surface in both themes (CVD and normal-vision separation, 3:1)."
+      },
+      {
+        "name": "chart-2",
+        "value": {
+          "dark": "#00a998",
+          "light": "#009b8b"
+        },
+        "usage": "Series slot 2 (teal). Assign slots in order, never cycled; marks only, labels stay in ink tokens. Validated on surface in both themes (CVD and normal-vision separation, 3:1)."
+      },
+      {
+        "name": "chart-3",
+        "value": {
+          "dark": "#8968d4",
+          "light": "#6d47b8"
+        },
+        "usage": "Series slot 3 (violet). Assign slots in order, never cycled; marks only, labels stay in ink tokens. Validated on surface in both themes (CVD and normal-vision separation, 3:1)."
+      },
+      {
+        "name": "chart-4",
+        "value": {
+          "dark": "#bf890d",
+          "light": "#c28400"
+        },
+        "usage": "Series slot 4 (gold). Assign slots in order, never cycled; marks only, labels stay in ink tokens. Validated on surface in both themes (CVD and normal-vision separation, 3:1)."
+      },
+      {
+        "name": "chart-5",
+        "value": {
+          "dark": "#3a8ce0",
+          "light": "#2474cf"
+        },
+        "usage": "Series slot 5 (blue). Assign slots in order, never cycled; marks only, labels stay in ink tokens. Validated on surface in both themes (CVD and normal-vision separation, 3:1)."
+      },
+      {
+        "name": "chart-6",
+        "value": {
+          "dark": "#d8488c",
+          "light": "#d43b86"
+        },
+        "usage": "Series slot 6 (magenta). Past six series, fold the rest into Other. Assign slots in order, never cycled; marks only, labels stay in ink tokens. Validated on surface in both themes (CVD and normal-vision separation, 3:1)."
+      }
+    ]
+  },
+  "type": {
+    "fonts": [
+      {
+        "family": "Bricolage Grotesque",
+        "file": "fonts/BricolageGrotesque-Variable.woff2",
+        "weight": "200 800",
+        "style": "normal"
+      },
+      {
+        "family": "Instrument Sans",
+        "file": "fonts/InstrumentSans-Variable.woff2",
+        "weight": "400 700",
+        "style": "normal"
+      },
+      {
+        "family": "JetBrains Mono",
+        "file": "fonts/JetBrainsMono-Variable.woff2",
+        "weight": "100 800",
+        "style": "normal"
+      }
+    ],
+    "families": {
+      "display": "\"Bricolage Grotesque\", \"Instrument Sans\", ui-sans-serif, system-ui, sans-serif",
+      "sans": "\"Instrument Sans\", ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", sans-serif",
+      "mono": "\"JetBrains Mono\", ui-monospace, \"SF Mono\", Menlo, Consolas, monospace"
+    },
+    "groups": [
+      {
+        "name": "Display",
+        "family": "display",
+        "note": "Bricolage Grotesque, variable with optical sizing: it tightens on its own as it grows. Titles only, never body copy or numbers.",
+        "styles": [
+          {
+            "name": "text-display",
+            "fontSize": "44px",
+            "lineHeight": "48px",
+            "fontWeight": 600,
+            "letterSpacing": "-0.025em",
+            "sample": "Everything is running",
+            "usage": "Empty states, onboarding and first-run screens. One per view, if any."
+          },
+          {
+            "name": "text-headline",
+            "fontSize": "30px",
+            "lineHeight": "36px",
+            "fontWeight": 600,
+            "letterSpacing": "-0.02em",
+            "sample": "Pipeline overview",
+            "usage": "Page titles."
+          },
+          {
+            "name": "text-title",
+            "fontSize": "20px",
+            "lineHeight": "28px",
+            "fontWeight": 600,
+            "letterSpacing": "-0.01em",
+            "sample": "Recent runs",
+            "usage": "Section and dialog titles."
+          }
+        ]
+      },
+      {
+        "name": "Text",
+        "family": "sans",
+        "note": "Instrument Sans carries the interface. Sentence case everywhere.",
+        "styles": [
+          {
+            "name": "text-subtitle",
+            "fontSize": "15px",
+            "lineHeight": "22px",
+            "fontWeight": 600,
+            "sample": "Ingestion throughput",
+            "usage": "Card titles and table group headings."
+          },
+          {
+            "name": "text-body-lg",
+            "fontSize": "16px",
+            "lineHeight": "24px",
+            "fontWeight": 400,
+            "sample": "Runs pause on their own when a source stops responding, and pick up again when it recovers.",
+            "usage": "Reading text: dialog bodies, empty-state descriptions, docs."
+          },
+          {
+            "name": "text-body",
+            "fontSize": "14px",
+            "lineHeight": "20px",
+            "fontWeight": 400,
+            "sample": "Last synced 4 minutes ago from the warehouse.",
+            "usage": "Default interface text, table cells, field values."
+          },
+          {
+            "name": "text-label",
+            "fontSize": "13px",
+            "lineHeight": "18px",
+            "fontWeight": 500,
+            "sample": "Run pipeline",
+            "usage": "Buttons, field labels, tabs, nav items, table headers."
+          },
+          {
+            "name": "text-caption",
+            "fontSize": "12px",
+            "lineHeight": "16px",
+            "fontWeight": 400,
+            "sample": "Updated 9:42 AM · 3 sources",
+            "usage": "Help text, timestamps, metadata, chart axis labels."
+          }
+        ]
+      },
+      {
+        "name": "Numbers",
+        "family": "sans",
+        "note": "Figures stay in the interface sans at semibold with proportional digits; columns that must align add tabular-nums.",
+        "styles": [
+          {
+            "name": "text-metric-lg",
+            "fontSize": "48px",
+            "lineHeight": "52px",
+            "fontWeight": 600,
+            "letterSpacing": "-0.03em",
+            "sample": "1,284,302",
+            "usage": "The hero figure a dashboard leads with. Exactly one per view."
+          },
+          {
+            "name": "text-metric",
+            "fontSize": "28px",
+            "lineHeight": "32px",
+            "fontWeight": 600,
+            "letterSpacing": "-0.02em",
+            "sample": "98.6%",
+            "usage": "Stat card values."
+          }
+        ]
+      },
+      {
+        "name": "Mono",
+        "family": "mono",
+        "note": "JetBrains Mono for anything a person might copy: IDs, hashes, code, log lines, keys.",
+        "styles": [
+          {
+            "name": "text-code",
+            "fontSize": "13px",
+            "lineHeight": "20px",
+            "fontWeight": 400,
+            "sample": "run 7f3c9a · 212 ms",
+            "usage": "Code, IDs, hashes, log lines, keyboard keys."
+          },
+          {
+            "name": "text-eyebrow",
+            "fontSize": "11px",
+            "lineHeight": "16px",
+            "fontWeight": 500,
+            "letterSpacing": "0.08em",
+            "sample": "QUEUE DEPTH",
+            "usage": "Uppercase overlines above a group or a metric; set the caps with text-transform."
+          }
+        ]
+      }
+    ]
+  },
+  "spacing": {
+    "note": "4px base. Use the steps; never in-between values.",
+    "tokens": [
+      {
+        "name": "space-1",
+        "value": "4px",
+        "usage": "Icon-to-label gap inside badges; checkbox-to-label nudge."
+      },
+      {
+        "name": "space-2",
+        "value": "8px",
+        "usage": "Icon-to-label gap in buttons and nav items; gap between stacked chips."
+      },
+      {
+        "name": "space-3",
+        "value": "12px",
+        "usage": "Horizontal padding of small controls; label-to-field gap; table cell inset."
+      },
+      {
+        "name": "space-4",
+        "value": "16px",
+        "usage": "Horizontal padding of buttons and fields; gap between form rows."
+      },
+      {
+        "name": "space-5",
+        "value": "20px",
+        "usage": "Card padding."
+      },
+      {
+        "name": "space-6",
+        "value": "24px",
+        "usage": "Gap between cards in a grid; dialog padding."
+      },
+      {
+        "name": "space-8",
+        "value": "32px",
+        "usage": "Gap between page sections."
+      },
+      {
+        "name": "space-10",
+        "value": "40px",
+        "usage": "Page gutter on wide screens."
+      },
+      {
+        "name": "space-12",
+        "value": "48px",
+        "usage": "Empty-state padding; space above a page title."
+      },
+      {
+        "name": "space-16",
+        "value": "64px",
+        "usage": "Hero spacing on first-run and marketing-adjacent screens."
+      }
+    ]
+  },
+  "radius": {
+    "note": "Soft rectangles; pills only for badges, switches, avatars and progress.",
+    "tokens": [
+      {
+        "name": "radius-xs",
+        "value": "4px",
+        "usage": "Checkboxes, tooltips, keyboard keys, tags inside table cells."
+      },
+      {
+        "name": "radius-sm",
+        "value": "6px",
+        "usage": "Small buttons, nav items, segmented-control segments."
+      },
+      {
+        "name": "radius-md",
+        "value": "8px",
+        "usage": "Buttons, fields, selects, alerts, menus."
+      },
+      {
+        "name": "radius-lg",
+        "value": "12px",
+        "usage": "Cards, toasts, popovers."
+      },
+      {
+        "name": "radius-xl",
+        "value": "16px",
+        "usage": "Dialogs and large panels."
+      },
+      {
+        "name": "radius-full",
+        "value": "9999px",
+        "usage": "Pills: badges, switches, avatars, progress bars."
+      }
+    ]
+  },
+  "shadow": {
+    "note": "Borders separate in the dark theme; shadows are reserved for things that float. Glow is the ember accent’s light and belongs to the primary action only.",
+    "tokens": [
+      {
+        "name": "shadow-xs",
+        "value": {
+          "dark": "0 1px 2px 0 #00000052",
+          "light": "0 1px 2px 0 #1e18140f"
+        },
+        "usage": "Buttons and fields at rest."
+      },
+      {
+        "name": "shadow-sm",
+        "value": {
+          "dark": "0 1px 2px 0 #0000005c, 0 2px 8px -2px #0000004d",
+          "light": "0 1px 2px 0 #1e18140d, 0 2px 8px -2px #1e181414"
+        },
+        "usage": "Cards on bg."
+      },
+      {
+        "name": "shadow-md",
+        "value": {
+          "dark": "0 4px 12px -2px #00000080, 0 12px 32px -8px #000000a6",
+          "light": "0 4px 12px -2px #1e18141a, 0 12px 32px -8px #1e181429"
+        },
+        "usage": "Menus, popovers, tooltips, toasts."
+      },
+      {
+        "name": "shadow-lg",
+        "value": {
+          "dark": "0 8px 24px -4px #0000009e, 0 32px 64px -16px #000000c2",
+          "light": "0 8px 24px -4px #1e18141f, 0 32px 64px -16px #1e18143d"
+        },
+        "usage": "Dialogs."
+      },
+      {
+        "name": "highlight",
+        "value": {
+          "dark": "inset 0 1px 0 0 #ffffff14",
+          "light": "inset 0 1px 0 0 #ffffffb3"
+        },
+        "usage": "One-pixel top light on raised controls (primary and secondary buttons, selected segment)."
+      },
+      {
+        "name": "glow",
+        "value": {
+          "dark": "0 0 0 1px #fc601240, 0 6px 20px -6px #fc6012b3",
+          "light": "0 4px 14px -4px #d1450073"
+        },
+        "usage": "Ember glow on the primary button’s hover. Nothing else glows."
+      },
+      {
+        "name": "focus-ring",
+        "value": {
+          "dark": "0 0 0 2px #0f0c0a, 0 0 0 4px #ff8c4f",
+          "light": "0 0 0 2px #ffffff, 0 0 0 4px #d14500"
+        },
+        "usage": "Keyboard focus: a 2px gap in the page color, then 2px of solid focus color. Drawn as a shadow so it follows the radius; 3:1 or more on every surface."
+      }
+    ]
+  },
+  "size": {
+    "note": "Fixed dimensions shared by controls and layout.",
+    "tokens": [
+      {
+        "name": "control-sm",
+        "value": "28px",
+        "usage": "Height of small buttons, fields and segmented controls (dense tables, toolbars)."
+      },
+      {
+        "name": "control-md",
+        "value": "36px",
+        "usage": "Default height of buttons, fields and selects."
+      },
+      {
+        "name": "control-lg",
+        "value": "44px",
+        "usage": "Large buttons on empty states and touch-first screens."
+      },
+      {
+        "name": "icon-sm",
+        "value": "16px",
+        "usage": "Icons inside buttons, badges, fields and table cells."
+      },
+      {
+        "name": "icon-md",
+        "value": "20px",
+        "usage": "Nav icons, alert and toast icons."
+      },
+      {
+        "name": "icon-lg",
+        "value": "24px",
+        "usage": "Empty-state and standalone icons."
+      },
+      {
+        "name": "sidenav-width",
+        "value": "240px",
+        "usage": "Width of the expanded side navigation."
+      },
+      {
+        "name": "content-max",
+        "value": "1280px",
+        "usage": "Max width of page content beside the side nav."
+      }
+    ]
+  },
+  "zIndex": {
+    "note": "Stacking order, low to high.",
+    "tokens": [
+      {
+        "name": "z-sticky",
+        "value": "100",
+        "usage": "Sticky table headers and the top bar."
+      },
+      {
+        "name": "z-dropdown",
+        "value": "1000",
+        "usage": "Menus, selects and popovers."
+      },
+      {
+        "name": "z-overlay",
+        "value": "1300",
+        "usage": "The scrim behind a dialog."
+      },
+      {
+        "name": "z-modal",
+        "value": "1400",
+        "usage": "Dialogs."
+      },
+      {
+        "name": "z-toast",
+        "value": "1500",
+        "usage": "The toast stack."
+      },
+      {
+        "name": "z-tooltip",
+        "value": "1600",
+        "usage": "Tooltips, above everything."
+      }
+    ]
+  }
+}
