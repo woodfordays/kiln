@@ -1,0 +1,12 @@
+# NVIDIA GPUs through CUDA. Needs the NVIDIA Container Toolkit on the host
+# (scripts/install-nvidia-toolkit.sh). All GPUs are passed in; to pin a preset to some of
+# them, set CUDA_VISIBLE_DEVICES=0 (or 0,1) in that preset's environment.
+services:
+  kiln:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu, compute, utility]

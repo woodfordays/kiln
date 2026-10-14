@@ -1,4 +1,6 @@
 """The local model library: GGUF files under the models directory."""
+from __future__ import annotations
+
 import os
 import re
 from pathlib import Path

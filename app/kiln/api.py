@@ -1,4 +1,6 @@
 """The control port: REST API, server-sent events and the web UI."""
+from __future__ import annotations
+
 import asyncio
 import base64
 import csv
@@ -73,11 +75,20 @@ async def status():
     return {
         **manager.status(),
         "llama": {"version": meta["version"], "binary": meta["binary"], "error": meta["error"], "devices": meta["devices"]},
-        "gpu": {"available": gpu.sampler.available, "name": gpu.sampler.name,
+        "backend": os.environ.get("KILN_BACKEND") or _backend_from_devices(meta["devices"]),
+        "gpu": {"available": gpu.sampler.available, "name": gpu.sampler.name, "source": gpu.sampler.source,
                 "last": gpu.sampler.live[-1] if gpu.sampler.live else None},
         "auth": bool(config.UI_PASSWORD),
         "server_time": time.time(),
     }
+
+
+def _backend_from_devices(devices: list[str]) -> str:
+    joined = " ".join(devices)
+    for key, name in (("CUDA", "cuda"), ("Vulkan", "vulkan"), ("ROCm", "rocm"), ("Metal", "metal")):
+        if key in joined:
+            return name
+    return "cpu"
 
 
 class StartBody(BaseModel):
@@ -266,7 +277,7 @@ class DownloadBody(BaseModel):
 
 @app.get("/api/downloads")
 async def downloads_list():
-    return hf.downloader.list()
+    return hf.downloader.rows()
 
 
 @app.post("/api/downloads")

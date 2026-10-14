@@ -53,7 +53,13 @@ Why a child process instead of a sibling container driven over the Docker socket
 mount (that is root on the host), one image to build, and the controller sees stdout directly
 for logs and crash detection.
 
-### Backend: Vulkan
+### Backends: Vulkan (AMD/Intel) and CUDA (NVIDIA)
+
+One Dockerfile builds either backend from `KILN_BACKEND`; the vendor-specific GPU passthrough is a
+compose override (`compose.amd.yml`, `compose.nvidia.yml`) chosen by `COMPOSE_FILE`. The CUDA image is
+built on `nvidia/cuda:12.8.1` and gets the GPU through the NVIDIA Container Toolkit. The Vulkan
+details follow.
+
 
 The image compiles llama.cpp from source with `-DGGML_VULKAN=ON` on Ubuntu 26.04 and runs it
 with `mesa-vulkan-drivers` (RADV). The GPU is passed in with `/dev/dri` alone, and the
@@ -74,7 +80,7 @@ so `--spec-type draft-mtp` and the rest of your tuned flags keep working.
 | `stats.py` | Aggregates: range summary with deltas, time buckets, depth scatter, per-model table, lifetime totals. |
 | `models.py` + `gguf.py` | Scans `/models` for GGUF files, groups split shards, reads GGUF headers (arch, context length, quant). |
 | `hf.py` | Resolves a Hugging Face ID to downloadable GGUF variants; resumable streaming downloader with a queue. |
-| `gpu.py` | Samples AMD GPU sysfs (busy %, VRAM, power, temperature) every 2 s; keeps 10 min live, 1-minute averages in SQLite. |
+| `gpu.py` | Samples GPU busy %, VRAM, power and temperature every 2 s from amdgpu sysfs or `nvidia-smi` (all GPUs combined); keeps 10 min live, 1-minute averages in SQLite. |
 | `events.py` | Fan-out of server-sent events to open browser tabs. |
 | `tuner.py` | Flag tuner: fixed candidate order and benchmark, 2% keep margin, saves the winner as a preset. |
 | `api.py` | REST routes for the UI. |

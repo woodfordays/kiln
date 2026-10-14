@@ -1,4 +1,6 @@
 """Flag metadata parsed from `llama-server --help`, plus command-line import."""
+from __future__ import annotations
+
 import re
 import shlex
 import subprocess

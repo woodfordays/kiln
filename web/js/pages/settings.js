@@ -76,9 +76,10 @@ export function SettingsPage() {
 
       <${E.Card} title="llama.cpp">
         <dl className="facts facts--tight">
+          <div><dt className="text-caption muted">Backend</dt><dd className="text-body">${status ? ({ vulkan: 'Vulkan', cuda: 'CUDA', rocm: 'ROCm', metal: 'Metal', cpu: 'CPU only' }[status.backend] || status.backend) : '–'}</dd></div>
           <div><dt className="text-caption muted">Version</dt><dd className="text-code">${status && status.llama ? status.llama.version || '–' : '–'}</dd></div>
           <div><dt className="text-caption muted">Devices</dt><dd className="text-body">${status && status.llama && status.llama.devices.length ? status.llama.devices.join(', ') : 'None detected'}</dd></div>
-          <div><dt className="text-caption muted">GPU telemetry</dt><dd className="text-body">${status && status.gpu && status.gpu.available ? 'Reading amdgpu sysfs' : 'Unavailable'}</dd></div>
+          <div><dt className="text-caption muted">GPU telemetry</dt><dd className="text-body">${status && status.gpu && status.gpu.available ? ({ amd: 'amdgpu sysfs', nvidia: 'nvidia-smi' }[status.gpu.source] || status.gpu.source) + (status.gpu.name ? ' · ' + status.gpu.name : '') : 'Unavailable'}</dd></div>
         </dl>
       <//>
     </div>

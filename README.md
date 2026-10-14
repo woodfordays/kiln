@@ -1,7 +1,7 @@
 # Kiln
 
-A Docker deployment that runs llama.cpp's `llama-server` on the Vulkan backend behind a web
-control panel in the Ember design:
+A Docker deployment that runs llama.cpp's `llama-server` behind a web control panel in the
+Ember design. It builds for **AMD/Intel GPUs (Vulkan)** or **NVIDIA GPUs (CUDA)**, picked per host:
 
 - **Start, stop, restart and switch models** from the browser, with the live log, the exact
   command line and a history of every run.
@@ -24,10 +24,22 @@ Design and architecture notes are in [docs/DESIGN.md](docs/DESIGN.md).
 ## Quick start
 
 ```bash
-./scripts/install-docker.sh      # once per box, if Docker isn't installed (uses sudo)
-./scripts/setup-env.sh           # writes .env with your UID/GID and GPU group IDs
-docker compose up -d --build     # first build compiles llama.cpp: about 5 minutes on 24 threads
+./scripts/install-docker.sh            # once per box, if Docker isn't installed (uses sudo)
+./scripts/install-nvidia-toolkit.sh    # NVIDIA hosts only: lets containers use the GPU
+./scripts/setup-env.sh                 # detects the GPU and writes .env
+docker compose up -d --build           # first build compiles llama.cpp
 ```
+
+`setup-env.sh` picks the backend from the hardware: NVIDIA (`nvidia-smi` works) gets CUDA,
+everything else gets Vulkan. It also sets `COMPOSE_FILE` to add the matching GPU passthrough
+(`compose.nvidia.yml` or `compose.amd.yml`), and on NVIDIA it compiles only for the GPUs in that
+box (`CUDA_ARCHITECTURES`, e.g. `89` for an RTX 4090). Force a choice with
+`KILN_BACKEND=vulkan ./scripts/setup-env.sh`; Vulkan also runs on NVIDIA if you want to compare.
+
+| Backend | Base image | First build | Host needs |
+|---|---|---|---|
+| Vulkan | Ubuntu 26.04 + Mesa RADV | about 5 min, 786 MB image | `/dev/dri` (any recent kernel) |
+| CUDA | `nvidia/cuda:12.8.1` (Ubuntu 24.04) | 10–20 min for one architecture | NVIDIA driver 570+, NVIDIA Container Toolkit |
 
 Then open:
 
@@ -43,9 +55,13 @@ records the `timings` llama-server returns, so the dashboard counts every client
 
 | Variable | Default | Meaning |
 |---|---|---|
+| `KILN_BACKEND` | `vulkan` | `vulkan` (AMD/Intel) or `cuda` (NVIDIA). Also the image tag, `kiln:<backend>`. |
+| `COMPOSE_FILE` | `docker-compose.yml:compose.amd.yml` | Adds the GPU passthrough for the backend. |
+| `CUDA_VERSION` | `12.8.1` | CUDA toolkit for the image; the host driver must support it. |
+| `CUDA_ARCHITECTURES` | `default` | GPU architectures to compile, e.g. `89` or `86;89`. `default` = all (slow build). |
 | `MODELS_DIR` | `/opt/models` | Host folder mounted at `/models`. The HF cache is read from `<MODELS_DIR>/hf`; downloads go to `<MODELS_DIR>/gguf/<org>/<repo>/`. |
 | `KILN_UID`, `KILN_GID` | `1000` | The container runs as you, so downloaded files belong to you. |
-| `VIDEO_GID`, `RENDER_GID` | `44`, `993` | Host groups that own `/dev/dri` (`getent group video render`). |
+| `VIDEO_GID`, `RENDER_GID` | `44`, `993` | AMD only: host groups that own `/dev/dri` (`getent group video render`). |
 | `KILN_BIND` | `0.0.0.0` | Interface to publish on. Use `127.0.0.1` to keep it on this box. |
 | `KILN_UI_PORT`, `KILN_API_PORT` | `8090`, `8080` | Host ports. |
 | `KILN_UI_PASSWORD` | empty | Turns on HTTP Basic auth for the control panel (user `kiln`). |
@@ -83,13 +99,26 @@ docker compose up -d
 Presets, stats and run history live in `./data/kiln.db` and are untouched by rebuilds.
 After an upgrade, open a preset in the editor: flags the new build no longer knows are marked.
 
-## Vulkan notes
+## GPU notes
 
+**AMD / Intel (Vulkan)**
 - The image uses Mesa's RADV driver. Per-preset environment variables are the place for driver
   knobs such as `RADV_PERFTEST=…` or `GGML_VK_VISIBLE_DEVICES=0`.
 - RADV's shader cache is kept in `./data/cache/mesa`, so only the first load after a rebuild pays
   for shader compilation.
-- The CPU backend is built in every variant and picked at runtime, so one image runs on any x86-64 box.
+
+**NVIDIA (CUDA)**
+- GPU telemetry comes from `nvidia-smi`, which the container toolkit mounts in. On multi-GPU
+  hosts the dashboard shows combined VRAM and power and the hottest card's temperature.
+- All GPUs are passed in. To pin a preset to some of them, set `CUDA_VISIBLE_DEVICES=0` (or `0,1`)
+  in that preset's environment; use `-sm`/`-ts` flags to control how a model is split across cards.
+- An image built for one architecture won't run on a different GPU generation. Rebuild after
+  `setup-env.sh` on each box, or set `CUDA_ARCHITECTURES=default` once for a portable image.
+
+**Both**
+- The CPU backend is built in every variant and picked at runtime, so the image runs on any x86-64 CPU.
+- The tuner works the same way on both. On CUDA, quantized KV caches usually cost less speed than on
+  AMD, so "Every type that fits" is worth a run there.
 
 ## Running without Docker (development)
 

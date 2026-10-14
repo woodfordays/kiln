@@ -1,4 +1,6 @@
 """Entry point: `python -m kiln` runs the control UI and the API proxy on one event loop."""
+from __future__ import annotations
+
 import asyncio
 import contextlib
 import logging

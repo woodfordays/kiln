@@ -1,4 +1,6 @@
 """Hugging Face Hub: resolve an ID to GGUF variants, and a resumable download queue."""
+from __future__ import annotations
+
 import asyncio
 import json
 import os
@@ -167,7 +169,7 @@ class Downloader:
         self.cancelled: set[int] = set()
         self.current: int | None = None
 
-    def list(self) -> list[dict]:
+    def rows(self) -> list[dict]:
         rows = db.rows("SELECT * FROM downloads ORDER BY id DESC LIMIT 50")
         for r in rows:
             r["files"] = json.loads(r["files"])

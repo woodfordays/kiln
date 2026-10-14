@@ -1,4 +1,6 @@
 """Fan-out of server-sent events to every open browser tab."""
+from __future__ import annotations
+
 import asyncio
 import json
 from typing import Any

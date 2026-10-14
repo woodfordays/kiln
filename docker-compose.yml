@@ -1,20 +1,21 @@
+# Shared settings. GPU access lives in one override per vendor, picked by COMPOSE_FILE in .env:
+#   AMD / Intel (Vulkan):  COMPOSE_FILE=docker-compose.yml:compose.amd.yml
+#   NVIDIA (CUDA):         COMPOSE_FILE=docker-compose.yml:compose.nvidia.yml
+# scripts/setup-env.sh detects the GPU and writes this for you.
 services:
   kiln:
     build:
       context: .
       args:
+        KILN_BACKEND: ${KILN_BACKEND:-vulkan}
         LLAMA_CPP_REF: ${LLAMA_CPP_REF:-ff0dbb975e93a9a2899efa34bdd32d1c5cfbc183}
-    image: kiln:latest
+        CUDA_VERSION: ${CUDA_VERSION:-12.8.1}
+        CUDA_ARCHITECTURES: ${CUDA_ARCHITECTURES:-default}
+    image: kiln:${KILN_BACKEND:-vulkan}
     container_name: kiln
     restart: unless-stopped
     # Run as you, so downloads in the models folder belong to you.
     user: "${KILN_UID:-1000}:${KILN_GID:-1000}"
-    # The host's video and render groups own /dev/dri; `getent group video render` shows them.
-    group_add:
-      - "${VIDEO_GID:-44}"
-      - "${RENDER_GID:-993}"
-    devices:
-      - /dev/dri:/dev/dri
     ports:
       - "${KILN_BIND:-0.0.0.0}:${KILN_UI_PORT:-8090}:8090"   # control panel
       - "${KILN_BIND:-0.0.0.0}:${KILN_API_PORT:-8080}:8080"  # OpenAI-compatible API (recorded)

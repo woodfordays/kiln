@@ -1,4 +1,6 @@
 """Minimal GGUF header reader: returns scalar metadata, skips arrays."""
+from __future__ import annotations
+
 import mmap
 import struct
 

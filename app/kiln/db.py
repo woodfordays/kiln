@@ -1,4 +1,6 @@
 """SQLite storage. One connection, used from the event-loop thread only."""
+from __future__ import annotations
+
 import json
 import sqlite3
 import time

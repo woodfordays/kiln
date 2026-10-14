@@ -1,4 +1,6 @@
 """The API port: a passthrough proxy to llama-server that records per-request stats."""
+from __future__ import annotations
+
 import json
 import time
 

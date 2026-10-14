@@ -14,6 +14,8 @@ Deterministic by construction:
   its score beats it by more than NOISE (2%), with earlier candidates winning ties.
 Measured speeds still vary by a percent or two between runs; the margin keeps the outcome stable.
 """
+from __future__ import annotations
+
 import asyncio
 import json
 import os

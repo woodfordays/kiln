@@ -283,12 +283,13 @@ function GpuCard() {
   useEvent('gpu', (s) => setSamples((xs) => [...xs.slice(-299), s]));
   if (live.data && !live.data.available) {
     return html`<${E.Card} title="GPU"><${E.EmptyState} icon="server" title="No GPU telemetry"
-      description="Kiln reads AMD GPU stats from /sys/class/drm. Make sure the container can see the card." /><//>`;
+      description="Kiln reads AMD cards from /sys/class/drm and NVIDIA cards with nvidia-smi. Check that the container has the GPU (compose.amd.yml or compose.nvidia.yml)." /><//>`;
   }
   const last = samples[samples.length - 1];
   const xs = samples.map((s) => s.t);
   const fx = (t) => fmtWhen(t);
-  return html`<${E.Card} title="GPU" description="Live, last 10 minutes.">
+  const gpuName = live.data && live.data.name;
+  return html`<${E.Card} title="GPU" description=${(gpuName ? gpuName + ' · ' : '') + 'live, last 10 minutes.'}>
     <div className="stack">
       ${last && html`<${Meter} label="VRAM" value=${last.vram_used} max=${last.vram_total}
         valueText=${fmtBytes(last.vram_used) + ' of ' + fmtBytes(last.vram_total)} />`}

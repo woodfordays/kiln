@@ -1,4 +1,6 @@
 """Aggregations over the requests table for the dashboard."""
+from __future__ import annotations
+
 import math
 import time
 

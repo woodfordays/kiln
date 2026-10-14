@@ -1,4 +1,6 @@
 """Runtime configuration, read once from the environment."""
+from __future__ import annotations
+
 import os
 import shutil
 from pathlib import Path

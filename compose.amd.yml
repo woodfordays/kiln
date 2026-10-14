@@ -1,0 +1,9 @@
+# AMD (or Intel) GPUs through Vulkan: pass the DRM render nodes in.
+services:
+  kiln:
+    devices:
+      - /dev/dri:/dev/dri
+    # The host's video and render groups own /dev/dri; `getent group video render` shows them.
+    group_add:
+      - "${VIDEO_GID:-44}"
+      - "${RENDER_GID:-993}"
