@@ -7,6 +7,7 @@ import { ModelsPage } from './pages/models.js';
 import { RequestsPage } from './pages/requests.js';
 import { SettingsPage } from './pages/settings.js';
 import { TunerPage } from './pages/tuner.js';
+import { useBackgroundNotifications } from './notify.js';
 
 const PAGES = {
   overview: { label: 'Overview', icon: 'grid', component: OverviewPage },
@@ -33,6 +34,14 @@ function useTheme() {
   return [theme, setTheme];
 }
 
+/* A stable onClose per toast: Ember restarts the auto-dismiss timer whenever onClose changes, and
+   the shell re-renders on every status and download-progress event. */
+function ToastItem({ toast: t, onDismiss }) {
+  const close = useCallback(() => onDismiss(t.id), [t.id, onDismiss]);
+  return html`<${E.Toast} tone=${t.tone} title=${t.title} description=${t.description} action=${t.action}
+    duration=${t.duration} onClose=${close} />`;
+}
+
 function App() {
   const [route, setRoute] = useState(parseHash());
   const [status, setStatus] = useState(null);
@@ -41,6 +50,7 @@ function App() {
   const [navOpen, setNavOpen] = useState(false);
   const [theme, setTheme] = useTheme();
   const toastId = useRef(0);
+  const seedRef = useRef(() => {});
 
   useEffect(() => {
     const on = () => { setRoute(parseHash()); setNavOpen(false); window.scrollTo(0, 0); };
@@ -48,7 +58,7 @@ function App() {
     return () => window.removeEventListener('hashchange', on);
   }, []);
 
-  const refreshStatus = useCallback(() => api.get('/api/status').then(setStatus).catch(() => {}), []);
+  const refreshStatus = useCallback(() => api.get('/api/status').then((s) => { seedRef.current(s); setStatus(s); }).catch(() => {}), []);
   useEffect(() => { refreshStatus(); const id = setInterval(refreshStatus, 30000); return () => clearInterval(id); }, []);
   useEvent('status', (s) => setStatus((prev) => ({ ...(prev || {}), ...s })));
   useEvent('connection', (ok) => { if (ok) refreshStatus(); });
@@ -65,14 +75,18 @@ function App() {
     }).catch(() => {});
   }, []);
 
+  // duration 0 keeps a toast until it is dismissed. Returns the id, for dismiss().
   const toast = useCallback((t) => {
     const id = ++toastId.current;
     setToasts((ts) => [...ts.slice(-3), { id, duration: t.tone === 'danger' ? 8000 : 4500, ...t }]);
+    return id;
   }, []);
+  const dismiss = useCallback((id) => setToasts((ts) => ts.filter((x) => x.id !== id)), []);
   const fail = useCallback((err, title = 'Something went wrong') => toast({ tone: 'danger', title, description: err.message || String(err) }), [toast]);
   const go = useCallback((page, arg) => { location.hash = '#/' + page + (arg ? '/' + arg : ''); }, []);
+  seedRef.current = useBackgroundNotifications({ toast, dismiss, go }).seedStatus;
 
-  const ctx = { status, refreshStatus, toast, fail, go, route };
+  const ctx = { status, refreshStatus, toast, dismiss, fail, go, route };
   const Page = PAGES[route.page].component;
   const activeDownloads = Object.keys(downloads).length;
 
@@ -120,8 +134,7 @@ function App() {
       </div>
     </div>
     <${E.ToastRegion}>
-      ${toasts.map((t) => html`<${E.Toast} key=${t.id} tone=${t.tone} title=${t.title} description=${t.description}
-        duration=${t.duration} onClose=${() => setToasts((ts) => ts.filter((x) => x.id !== t.id))} />`)}
+      ${toasts.map((t) => html`<${ToastItem} key=${t.id} toast=${t} onDismiss=${dismiss} />`)}
     <//>
   <//>`;
 }

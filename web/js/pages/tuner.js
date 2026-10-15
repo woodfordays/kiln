@@ -1,5 +1,6 @@
 /* Tuner: measure flag candidates in a fixed order, keep the winner, save it as a preset. */
 import { html, E, useState, useEffect, useMemo, api, useApp, useFetch, useEvent, useNow, fmtInt, fmtTps, fmtPct, fmtBytes, fmtWhen, fmtDuration, isNum, commandLine, modelLabel } from '../lib.js';
+import { askDesktopPermission } from '../notify.js';
 
 const CTX_OPTIONS = [4096, 8192, 16384, 32768, 65536, 131072, 196608, 262144];
 const ctxLabel = (n) => (n % 1024 === 0 ? `${n / 1024}K` : fmtInt(n));
@@ -100,6 +101,7 @@ function TuneForm({ status, onStarted }) {
   const running = status && (status.state === 'ready' || status.state === 'loading');
 
   const start = async () => {
+    askDesktopPermission();
     setBusy(true);
     try {
       const r = await api.post('/api/tune', {
@@ -107,7 +109,7 @@ function TuneForm({ status, onStarted }) {
         base_preset_id: base ? Number(base) : null, name, start_after: startAfter,
         mode, kv_policy: kvPolicy, vary_batch: varyBatch,
       });
-      toast({ title: 'Tuning started', description: 'Each candidate loads the model, then runs the same benchmark.' });
+      toast({ title: 'Tuning started', description: 'Each candidate loads the model, then runs the same benchmark. You will get a notification when it finishes.' });
       onStarted(r.id);
     } catch (e) { fail(e, 'Could not start tuning'); } finally { setBusy(false); }
   };

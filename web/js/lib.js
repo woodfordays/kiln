@@ -36,7 +36,7 @@ let source = null;
 function ensureSource() {
   if (source) return;
   source = new EventSource('/api/events');
-  for (const kind of ['status', 'log', 'request', 'download', 'models', 'presets', 'gpu', 'tune']) {
+  for (const kind of ['status', 'log', 'request', 'download', 'models', 'presets', 'gpu', 'tune', 'tune_note']) {
     source.addEventListener(kind, (ev) => {
       let data;
       try { data = JSON.parse(ev.data); } catch { return; }
