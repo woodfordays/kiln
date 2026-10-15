@@ -80,6 +80,19 @@ enforces it and Kiln passes the header through.
 3. **Physical batch** `-ub` 256 / 512 / 1024 / 2048.
 4. **MTP self-speculative decoding**, `--spec-draft-n-max` 1 to 5, when the GGUF has an MTP head.
 
+**Optimize for: Context length** works differently. The target context is the requirement, and
+model weights may spill out of VRAM into system RAM to reach it, so the KV cache and the full
+context stay on the GPU:
+
+1. **Spill**: for each `-ub` (and each KV type, if *Every type that fits* is chosen), find the
+   smallest spill that loads with 512 MiB of VRAM to spare (plus 128 MiB the benchmark itself
+   needs). MoE models spill expert weights with `--n-cpu-moe N` (attention and KV stay on the
+   GPU); dense models spill whole layers with `-ngl`.
+   N is found by bisection with load-only probes (a few seconds each), starting each batch size
+   from the previous answer. Spill is capped by free system RAM (keeping 4 GiB).
+2. **Benchmark** the smallest spill for each batch size, then MTP on the fastest, then re-run the
+   top three. Scored like balanced, since long prompts are the point.
+
 Every candidate runs a full-batch warm-up, three fixed 128-token generations and a fixed deep prompt
 (seeded filler cut to an exact token count) twice, with temperature 0, seed 42, `ignore_eos`
 and the prompt cache off. `--fit off` stops llama.cpp from quietly shrinking a configuration. Scores:

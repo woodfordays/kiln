@@ -7,15 +7,28 @@ const OBJECTIVES = [
   { value: 'decode', label: 'Generation' },
   { value: 'balanced', label: 'Balanced' },
   { value: 'prefill', label: 'Prompt processing' },
+  { value: 'context', label: 'Context length' },
 ];
 const OBJ_HINT = {
   decode: 'Score: decode speed, geometric mean of a short prompt and the deep prompt.',
   balanced: 'Score: decode^0.7 × prefill^0.3, for long-document and agent work.',
   prefill: 'Score: prompt processing speed at the benchmark depth.',
+  context: 'Keeps the whole target context and its KV cache on the GPU, and moves model weights to system RAM until it fits: expert weights first on MoE models, whole layers on dense ones. Finds the smallest spill for each batch size, then scores like Balanced.',
 };
+
+/* What a configuration keeps in system RAM, for tables and the winner card. */
+function spillText(cfg, params) {
+  if (cfg.ncmoe) return `Experts of ${cfg.ncmoe} of ${params.n_layers} layers`;
+  if (cfg.ngl && cfg.ngl !== '99' && cfg.ngl !== 'auto') return `${params.n_layers + 1 - Number(cfg.ngl)} of ${params.n_layers + 1} layers`;
+  return 'Nothing';
+}
 
 function estimate(prm, hasMtp) {
   const spec = hasMtp && prm.speculative ? 5 : 0;
+  if (prm.objective === 'context') {
+    const kv = prm.kv_policy === 'all' ? 4 : 1;
+    return kv * (4 + 8 + 3 * 3) + spec + 3; // a benchmark and a few load-only probes per batch size
+  }
   if (prm.mode === 'quick') return 4 + 2 + 4 + spec;
   const kv = prm.kv_policy === 'all' ? 2 : 1; // typical: one or two KV types fit at a long context
   const fa = prm.kv_policy === 'all' ? 2 : 3;
@@ -78,7 +91,12 @@ function TuneForm({ status, onStarted }) {
   const [mode, setMode] = useState('grid');
   const [kvPolicy, setKvPolicy] = useState('precise');
   const [varyBatch, setVaryBatch] = useState(false);
-  const candidates = estimate({ mode, kv_policy: kvPolicy, vary_batch: varyBatch, speculative }, m && m.nextn_layers);
+  const isContext = objective === 'context';
+  const pickObjective = (o) => {
+    setObjective(o);
+    if (o === 'context' && ctxOpts.length) setCtx(ctxOpts[ctxOpts.length - 1].value);
+  };
+  const candidates = estimate({ objective, mode, kv_policy: kvPolicy, vary_batch: varyBatch, speculative }, m && m.nextn_layers);
   const running = status && (status.state === 'ready' || status.state === 'loading');
 
   const start = async () => {
@@ -102,7 +120,7 @@ function TuneForm({ status, onStarted }) {
           placeholder=${lib.length ? undefined : 'No models in the library'}
           hint=${m ? [m.arch, m.size_label, m.nextn_layers ? 'has an MTP head' : null].filter(Boolean).join(' · ') : undefined} />
         <${E.Select} label="Target context" value=${ctx} onChange=${(e) => setCtx(e.target.value)} options=${ctxOpts}
-          hint="The tuner keeps this fixed and finds the fastest way to run it." />
+          hint=${isContext ? 'The tuner keeps this fixed and moves as little of the model to system RAM as it takes to fit.' : 'The tuner keeps this fixed and finds the fastest way to run it.'} />
         <${E.Select} label="Benchmark depth" value=${depth} onChange=${(e) => setDepth(e.target.value)} options=${depthOpts}
           hint="Length of the deep prompt. Deeper is more realistic and slower to measure." />
         <${E.Select} label="Keep other flags from" optional value=${base} onChange=${(e) => setBase(e.target.value)}
@@ -111,23 +129,28 @@ function TuneForm({ status, onStarted }) {
       </div>
       <div>
         <p className="field-label text-label">Optimize for</p>
-        <${E.SegmentedControl} label="Optimize for" value=${objective} onChange=${setObjective} options=${OBJECTIVES} />
+        <${E.SegmentedControl} label="Optimize for" value=${objective} onChange=${pickObjective} options=${OBJECTIVES} />
         <p className="field-hint text-caption">${OBJ_HINT[objective]}</p>
       </div>
+      ${isContext && m && !m.block_count ? html`<${E.Alert} tone="warning" title="This model's layer count is unknown.">The tuner can't spill it to system RAM. Pick another objective.<//>` : null}
       <div className="grid grid--2" style=${{ gap: 'var(--space-4)' }}>
-        <div>
+        ${isContext ? html`<div>
+          <p className="field-label text-label">Search</p>
+          <p className="text-body">Smallest spill per batch size</p>
+          <p className="field-hint text-caption">${m && m.expert_count ? `MoE model: moves expert weights of the first N layers (--n-cpu-moe), so attention and the KV cache stay on the GPU.` : 'Dense model: moves whole layers (-ngl). The KV cache of those layers moves with them.'} Each N is found by bisection with load-only probes.</p>
+        </div>` : html`<div>
           <p className="field-label text-label">Search</p>
           <${E.SegmentedControl} label="Search" value=${mode} onChange=${setMode}
             options=${[{ value: 'grid', label: 'Every combination' }, { value: 'quick', label: 'One flag at a time' }]} />
           <p className="field-hint text-caption">${mode === 'grid'
             ? 'Measures every combination of the values below, so interactions between flags show up. The best three are measured again before one is picked.'
             : 'Tunes each flag in turn and keeps a change only if it wins by more than 2%. Faster, but can miss combinations that only work together.'}</p>
-        </div>
+        </div>`}
         <${E.Select} label="KV cache types" value=${kvPolicy} onChange=${(e) => setKvPolicy(e.target.value)}
           options=${[{ value: 'precise', label: 'Most precise type that fits' }, { value: 'all', label: 'Every type that fits' }]}
           hint=${kvPolicy === 'all' ? 'Lower-precision KV can win on speed; it costs some output quality at long context.' : 'f16, then q8_0, then q4_0: the first that leaves 512 MiB spare.'} />
       </div>
-      ${mode === 'grid' && html`<${E.Checkbox} label="Also vary the logical batch (-b)" checked=${varyBatch} onChange=${(e) => setVaryBatch(e.target.checked)}
+      ${mode === 'grid' && !isContext && html`<${E.Checkbox} label="Also vary the logical batch (-b)" checked=${varyBatch} onChange=${(e) => setVaryBatch(e.target.checked)}
         description="Tries -b equal to -ub, 2048 and 4096 for every -ub. Nearly triples the run." />`}
       ${m && m.nextn_layers ? html`<${E.Switch} label="Try self-speculative decoding (MTP)" checked=${speculative} onChange=${(e) => setSpeculative(e.target.checked)}
         description="Tests --spec-type draft-mtp with 1 to 5 draft tokens. Acceptance is measured with greedy decoding, which can run higher than with sampling." />` : null}
@@ -181,7 +204,9 @@ function TuneResult({ tune, live }) {
     { key: 'n', header: '#', numeric: true },
     { key: 'stage', header: 'Stage' },
     { key: 'label', header: 'Candidate', mono: true, render: (t) => html`<span className="nowrap">${t.label}</span>` },
-    { key: 'result', header: 'Result', render: (t) => (t.ok
+    { key: 'result', header: 'Result', render: (t) => (t.probe
+      ? html`<span className="row" style=${{ flexWrap: 'nowrap' }}>${t.fits ? html`<${E.Badge} size="sm" tone="neutral" icon="check">Fits<//>` : html`<${E.Badge} size="sm" tone="neutral" icon="minus">Too big<//>`}${t.error && html`<span className="text-caption subtle truncate" style=${{ maxWidth: 220 }} title=${t.error}>${t.error}</span>`}</span>`
+      : t.ok
       ? (t.best ? html`<${E.Badge} size="sm" tone="ember" icon="check">Winner<//>`
         : t.finalist ? html`<${E.Badge} size="sm" tone="info">Finalist<//>`
         : t.stage === 'Confirm' ? html`<${E.Badge} size="sm" tone="neutral" icon="refresh">Re-run<//>`
@@ -206,6 +231,7 @@ function TuneResult({ tune, live }) {
           <div><dt className="text-caption">Decode at ${fmtInt(tune.params.depth)}</dt><dd className="text-subtitle">${fmtTps(best.decodeD)} t/s</dd></div>
           <div><dt className="text-caption">Prefill at ${fmtInt(tune.params.depth)}</dt><dd className="text-subtitle">${fmtTps(best.prefillD)} t/s</dd></div>
           <div><dt className="text-caption">Draft acceptance</dt><dd className="text-subtitle">${best.draft != null ? fmtPct(best.draft) : '–'}</dd></div>
+          ${obj === 'context' && html`<div><dt className="text-caption">In system RAM</dt><dd className="text-subtitle">${spillText(best.cfg, tune.params)}</dd></div>`}
           <div><dt className="text-caption">VRAM free</dt><dd className="text-subtitle">${isNum(best.vram_free_mib) ? fmtBytes(best.vram_free_mib * 2 ** 20) : '–'}</dd></div>
           <div><dt className="text-caption">vs first fit</dt><dd className="text-subtitle">${first && first !== best ? ((best.score / first.score - 1) * 100 >= 0 ? '+' : '') + ((best.score / first.score - 1) * 100).toFixed(1) + '%' : 'same'}</dd></div>
         </dl>
@@ -215,7 +241,7 @@ function TuneResult({ tune, live }) {
     ${tune.status === 'failed' && html`<${E.Alert} tone="danger" title="Tuning failed.">${tune.error}<//>`}
     ${(tune.status === 'cancelled' || tune.status === 'interrupted') && html`<${E.Alert} tone="info" title=${tune.status === 'cancelled' ? 'Tuning was cancelled.' : 'Tuning was interrupted by a restart.'}>Measured candidates are kept below. Nothing was saved.<//>`}
     <${E.Card} title="Candidates" padding="none"
-      description=${tune.params.mode === 'quick' ? `${trials.length} measured one flag at a time. A change is kept only if it beats the current choice by more than 2%.` : `${trials.filter((t) => !t.pruned).length} measured, ${trials.filter((t) => t.pruned).length} pruned. Every combination in a fixed order; the top three are re-run and ranked on both runs, and the simplest stays unless another beats it by more than 2%. Sort by any column.`}>
+      description=${obj === 'context' ? `${trials.filter((t) => t.probe).length} load-only probes found the smallest spill for each batch size; ${trials.filter((t) => !t.probe).length} benchmarks measured them. The top three are re-run, and the simplest stays unless another beats it by more than 2%. Sort by any column.` : tune.params.mode === 'quick' ? `${trials.length} measured one flag at a time. A change is kept only if it beats the current choice by more than 2%.` : `${trials.filter((t) => !t.pruned).length} measured, ${trials.filter((t) => t.pruned).length} pruned. Every combination in a fixed order; the top three are re-run and ranked on both runs, and the simplest stays unless another beats it by more than 2%. Sort by any column.`}>
       <${E.Table} caption="Tuning candidates" density="compact" columns=${columns} rows=${trials} rowKey=${(t) => String(t.n)}
         empty=${live ? 'Loading the first candidate…' : 'No candidates measured.'} />
     <//>
@@ -225,6 +251,7 @@ function TuneResult({ tune, live }) {
 function tuneCommand(tune, best) {
   const c = best.cfg;
   const tuned = c.ngl === 'auto' ? [{ flag: '--fit', value: 'on' }] : [{ flag: '-ngl', value: c.ngl }, { flag: '--fit', value: 'off' }];
+  if (c.ncmoe) tuned.push({ flag: '--n-cpu-moe', value: c.ncmoe });
   tuned.push(...[['-c', c.ctx], ['-np', c.np], ['-fa', c.fa], ['-ctk', c.ctk], ['-ctv', c.ctv], ['-ub', c.ub], ['-b', c.b]].map(([flag, value]) => ({ flag, value })));
   if (c.spec) tuned.push({ flag: '--spec-type', value: c.spec }, { flag: '--spec-draft-n-max', value: c.nmax });
   return commandLine(tune.model, [...(tune.params.base ? tune.params.base.flags : []), ...tuned], tune.params.base ? tune.params.base.env : {});
@@ -237,7 +264,7 @@ function History({ tunes, selected, onSelect }) {
     { key: 'created_at', header: 'Started', render: (t) => fmtWhen(t.created_at, now) },
     { key: 'model', header: 'Model', render: (t) => modelLabel(t.model) },
     { key: 'ctx', header: 'Context', numeric: true, render: (t) => ctxLabel(t.params.ctx) },
-    { key: 'obj', header: 'Objective', render: (t) => t.params.objective },
+    { key: 'obj', header: 'Objective', render: (t) => (OBJECTIVES.find((o) => o.value === t.params.objective) || { label: t.params.objective }).label },
     { key: 'decode', header: 'Winner decode', numeric: true, render: (t) => (t.best ? fmtTps(t.best.decode0) + ' t/s' : '–') },
     { key: 'status', header: 'Result', render: (t) => html`<${E.Badge} size="sm" tone=${tone[t.status] || 'neutral'}>${t.status}<//>` },
     { key: 'view', header: '', align: 'end', render: (t) => html`<${E.Button} size="sm" variant=${t.id === selected ? 'secondary' : 'ghost'} onClick=${() => onSelect(t.id)}>${t.id === selected ? 'Showing' : 'Show'}<//>` },

@@ -82,7 +82,7 @@ so `--spec-type draft-mtp` and the rest of your tuned flags keep working.
 | `hf.py` | Resolves a Hugging Face ID to downloadable GGUF variants; resumable streaming downloader with a queue. |
 | `gpu.py` | Samples GPU busy %, VRAM, power and temperature every 2 s from amdgpu sysfs or `nvidia-smi` (all GPUs combined); keeps 10 min live, 1-minute averages in SQLite. |
 | `events.py` | Fan-out of server-sent events to open browser tabs. |
-| `tuner.py` | Flag tuner: fixed candidate order and benchmark, 2% keep margin, saves the winner as a preset. |
+| `tuner.py` | Flag tuner: fixed candidate order and benchmark, 2% keep margin, saves the winner as a preset. The context-length objective bisects the smallest spill of weights to system RAM (`--n-cpu-moe` or `-ngl`) that fits the target context. |
 | `api.py` | REST routes for the UI. |
 
 ### llama-server lifecycle
