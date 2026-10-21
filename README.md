@@ -81,7 +81,7 @@ records the `timings` llama-server returns, so the dashboard counts every client
 
 Advanced, set in the `environment:` of `docker-compose.yml` if you need them: `KILN_SWAP_TIMEOUT` (900 s a
 request waits for a model to load), `KILN_DRAIN_TIMEOUT` (60 s running requests get before their model is
-stopped to make room), `KILN_STOP_TIMEOUT` (15 s before SIGKILL) and `KILN_INTERNAL_PORT` (8081; models
+stopped to make room), `KILN_STOP_TIMEOUT` (15 s before SIGKILL), `KILN_IDLE_CHECK_INTERVAL` (30 s between idle-timeout checks) and `KILN_INTERNAL_PORT` (8081; models
 take the next free port from here, and the tuner uses `KILN_INTERNAL_PORT + 100`).
 
 The API port has no auth of its own. To require a key, add `--api-key …` to a preset; llama-server
@@ -127,6 +127,12 @@ out of time to first token. Settings also caps how many models run at once, and 
 start on boot, one after another. The API port has no auth of its own, so anyone who can reach it can
 make Kiln load any preset: a preset with `--api-key` is only loaded (and only listed in `/v1/models`) for
 requests that carry one of its keys, and you can turn swapping off in Settings.
+
+**Idle timeout** (Settings, 2 hours by default, or never). A model that no completion, embedding, rerank or
+decision request has used for that long is stopped, so a forgotten model doesn't hold the GPU all night.
+Health checks and `/props` don't count as use, models with a request running are left alone, and a preset
+set to **Keep loaded** is never unloaded. With swap on request, the next request that names the preset loads
+it again.
 
 The tuner stops everything for the GPU and starts what was running again when it finishes.
 

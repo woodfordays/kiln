@@ -236,6 +236,12 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         s = r.json()
         self.assertEqual((s["autostart_preset_ids"], s["swap_on_request"], s["max_instances"]), ([a["id"]], False, 16))
         self.assertEqual((await self.http.put("/api/settings", json={"max_instances": 0})).json()["max_instances"], 1)
+        self.assertEqual(db.DEFAULT_SETTINGS["idle_timeout_min"], 120)
+        put = lambda v: self.http.put("/api/settings", json={"idle_timeout_min": v})
+        self.assertEqual((await put(30)).json()["idle_timeout_min"], 30)
+        self.assertEqual((await put(-5)).json()["idle_timeout_min"], 0)
+        self.assertEqual((await put(None)).json()["idle_timeout_min"], 0)
+        self.assertEqual((await put(120)).json()["idle_timeout_min"], 120)
         await self.http.delete(f"/api/presets/{a['id']}")  # deleting a preset drops it from the boot list
         self.assertEqual((await self.http.get("/api/settings")).json()["autostart_preset_ids"], [])
 

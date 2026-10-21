@@ -81,6 +81,8 @@ export function useBackgroundNotifications({ toast, dismiss, go }) {
     }
   });
 
+  useEvent('idle_unload', (u) => notify({ title: `${u.name} unloaded`, description: `No requests for ${fmtDuration(u.idle_s)}, so Kiln stopped it to free GPU memory.` }, { tag: 'idle-' + u.run_id, page: 'server' }));
+
   // Model state changes this tab saw happen, per running llama-server. The tuner drives its own processes
   // while it holds the GPU, so those are left to the tune notifications.
   const onStatus = (s) => {

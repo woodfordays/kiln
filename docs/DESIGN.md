@@ -115,6 +115,12 @@ the memory as free, take the next free port, spawn. `replace` is `true` (stop ev
 presets: what the extension sends), a list of run ids, or `"auto"` (idle, unpinned, least recently used first). An unfit start raises `NoFit`, which the API returns as a 409 with the
 models that could be stopped.
 
+**Idle timeout** (`Fleet.unload_idle`, run every `KILN_IDLE_CHECK_INTERVAL` = 30 s by `__main__._idle_loop`): the
+`idle_timeout_min` setting (default 120, 0 = off) stops a ready model that has no request in flight and whose
+last request ended (or which became ready, if none came) that long ago. Only proxied inference requests count;
+`/health`, `/props` and the like use `begin(touch=False)`. Pinned presets, models still loading and anything
+while the tuner holds the GPU are skipped. It publishes an `idle_unload` event for the UI's toast.
+
 **Swap on request** (`Fleet.ensure`): the proxy asks for the preset a request names; one load is shared by
 every waiting request, models being stopped drain their in-flight requests first, and the proxy forwards when
 the instance is ready.
@@ -209,9 +215,9 @@ GET/POST/DELETE /api/downloads[/id]   queue, start, forget; /cancel, /retry
 POST /api/tune ; /api/tune/cancel ; GET /api/tune[/id]
 GET  /api/stats/{summary,timeseries,scatter,models,lifetime,slots}?range=&model=
 GET  /api/requests ; /api/requests.csv ; GET /api/gpu/{live,history}
-GET/PUT /api/settings                 hf_token, autostart_preset_ids, swap_on_request, max_instances, retention_days
+GET/PUT /api/settings                 hf_token, autostart_preset_ids, swap_on_request, max_instances, idle_timeout_min, retention_days
 POST /api/stats/reset
-GET  /api/events                      SSE: status, presets, tune, tune_note, download, models, request, log, gpu
+GET  /api/events                      SSE: status, presets, tune, tune_note, download, idle_unload, models, request, log, gpu
 ```
 
 ## API surface (API port)

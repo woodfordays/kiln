@@ -616,6 +616,8 @@ async def settings_put(values: dict):
         allowed["swap_on_request"] = bool(values["swap_on_request"])
     if "max_instances" in values:
         allowed["max_instances"] = min(16, max(1, int(values["max_instances"] or 1)))
+    if "idle_timeout_min" in values:
+        allowed["idle_timeout_min"] = max(0, int(values["idle_timeout_min"] or 0))
     if "retention_days" in values:
         allowed["retention_days"] = max(0, int(values["retention_days"] or 0))
     db.set_settings(allowed)

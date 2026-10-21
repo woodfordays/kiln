@@ -274,7 +274,7 @@ export function PresetEditor({ preset, onClose, onSaved }) {
       ${roles[role] && roles[role].adds && html`<p className="text-caption muted">Kiln adds when it starts: <span className="mono">${roles[role].adds}</span></p>`}
       <${RoleNote} role=${role} decision=${decision} />
       <${E.Switch} label="Keep loaded" checked=${pinned} onChange=${(e) => setPinned(e.target.checked)}
-        description="Never stopped to make room for another model, by a request or by Start." />
+        description="Never stopped to make room for another model, by a request or by Start, and never unloaded for being idle." />
 
       <${FeaturesPanel} model=${current} role=${role} rows=${rows} onChange=${(next) => touchRows(() => ensureIds(next))} />
 

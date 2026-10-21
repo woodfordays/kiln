@@ -1,5 +1,12 @@
-/* Settings: Hugging Face token, autostart, retention, paths, stats reset. */
+/* Settings: Hugging Face token, model sharing and idle timeout, autostart, retention, paths, stats reset. */
 import { html, E, useState, useEffect, api, useApp, useFetch } from '../lib.js';
+
+const IDLE_MINUTES = [0, 15, 30, 60, 120, 240, 480, 720, 1440];
+
+function idleLabel(min) {
+  if (!min) return 'Never';
+  return min < 60 ? `${min} minutes` : min === 60 ? '1 hour' : min % 60 ? `${min} minutes` : `${min / 60} hours`;
+}
 
 export function SettingsPage() {
   const { toast, fail, status } = useApp();
@@ -62,6 +69,10 @@ export function SettingsPage() {
             onChange=${(e) => save({ max_instances: Number(e.target.value) }, 'Limit updated')}
             options=${[1, 2, 3, 4, 6, 8, 12, 16].map((n) => ({ value: String(n), label: n === 1 ? '1: one model at a time' : String(n) }))}
             hint="Kiln also checks GPU memory before it starts another model. This caps how many run even when they fit." />
+          <${E.Select} label="Unload idle models after" value=${String(s.idle_timeout_min || 0)}
+            onChange=${(e) => save({ idle_timeout_min: Number(e.target.value) }, e.target.value === '0' ? 'Idle models stay loaded' : 'Idle timeout updated')}
+            options=${[...new Set([...IDLE_MINUTES, s.idle_timeout_min || 0])].sort((a, b) => a - b).map((m) => ({ value: String(m), label: idleLabel(m) }))}
+            hint="A model that has had no completion, embedding or rerank request for this long is stopped to free its memory. If “Load models when a request names them” is on, the next request that names it loads it again. Presets set to Keep loaded are never unloaded." />
         </div>
       <//>
 

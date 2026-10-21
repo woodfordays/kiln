@@ -67,6 +67,7 @@ STOP_TIMEOUT_S = float(_env("KILN_STOP_TIMEOUT", "15"))
 SWAP_TIMEOUT_S = float(_env("KILN_SWAP_TIMEOUT", "900"))
 DRAIN_TIMEOUT_S = float(_env("KILN_DRAIN_TIMEOUT", "60"))
 GPU_SAMPLE_S = float(_env("KILN_GPU_SAMPLE_INTERVAL", "2"))
+IDLE_CHECK_S = float(_env("KILN_IDLE_CHECK_INTERVAL", "30"))  # how often models are checked against the idle timeout
 
 
 def ensure_dirs() -> None:

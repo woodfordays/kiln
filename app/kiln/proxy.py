@@ -387,14 +387,14 @@ async def _forward(request: Request, url_path: str, body: bytes, inst, tracked: 
     params = [(k, v) for k, v in request.query_params.multi_items() if k != "model"]  # ?model= only picks the route
     upstream = _client.build_request(request.method, inst.url + url_path, params=params, headers=headers, content=body)
     rec = Recorder(url_path, body, request.client.host if request.client else "", inst, swap_ms) if tracked else None
-    inst.begin()
+    inst.begin(touch=tracked)  # /health, /props and the like don't count as use
     closed = False
 
     def release() -> None:
         nonlocal closed
         if not closed:
             closed = True
-            inst.end()
+            inst.end(touch=tracked)
 
     try:
         resp = await _client.send(upstream, stream=True)

@@ -1,8 +1,9 @@
 import asyncio
 import contextlib
+import time
 import unittest
 
-from kiln import config, db, fit
+from kiln import config, db, events, fit
 from kiln.server import Fleet, NoFit
 from . import ROOT
 from .helpers import fake_gpu, llm, make_preset
@@ -15,7 +16,8 @@ def model(name, **kw):
 class FleetTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         db.execute("DELETE FROM presets")
-        db.set_settings({"max_instances": 4})
+        db.set_settings({"max_instances": 4, "idle_timeout_min": 10})
+        self.addCleanup(db.set_settings, {"idle_timeout_min": 120})
         self.fleet = Fleet()
         self.stack = contextlib.ExitStack()
         self.addCleanup(self.stack.close)
@@ -212,6 +214,66 @@ class FleetTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((alpha2.name, alpha2.state), ("alpha", "ready"))
         self.assertIsNot(alpha2, a)
         self.assertEqual([i.name for i in self.fleet.live()], ["alpha"])
+
+    # ------------------------------------------------------------ idle timeout
+
+    @staticmethod
+    def idle(inst, minutes):
+        inst.last_used = inst.ready_at = time.time() - minutes * 60
+
+    async def test_models_idle_past_the_timeout_are_unloaded(self):
+        a, b = await self.up("alpha"), await self.up("beta")
+        self.idle(a, 11)
+        self.idle(b, 9)
+        q = events.subscribe()
+        self.addCleanup(events.unsubscribe, q)
+        self.assertEqual([i.name for i in await self.fleet.unload_idle()], ["alpha"])
+        self.assertEqual((a.state, b.state), ("stopped", "ready"))
+        self.assertEqual([i.name for i in self.fleet.live()], ["beta"])
+        kinds = []
+        while not q.empty():
+            kinds.append(q.get_nowait().split("\n", 1)[0])
+        self.assertIn("event: idle_unload", kinds)
+        self.assertIn("Stopping after 11 min", "".join(l[1] for l in a.logs))
+
+    async def test_a_timeout_of_zero_never_unloads(self):
+        db.set_settings({"idle_timeout_min": 0})
+        a = await self.up("alpha")
+        self.idle(a, 100000)
+        self.assertEqual(await self.fleet.unload_idle(), [])
+        self.assertEqual(a.state, "ready")
+
+    async def test_a_model_never_used_counts_idle_from_when_it_became_ready(self):
+        a = await self.up("alpha")
+        a.last_used = time.time() - 3600  # set when the load began, long before it finished
+        a.ready_at = time.time() - 60
+        self.assertEqual(await self.fleet.unload_idle(), [])
+        self.assertAlmostEqual(a.idle_s(), 60, delta=2)
+
+    async def test_pinned_busy_and_tuner_held_models_stay(self):
+        pinned, busy, plain = await self.up("alpha", pinned=1), await self.up("beta"), await self.up("gamma")
+        late_pin = await self.up("delta")
+        for i in (pinned, busy, plain, late_pin):
+            self.idle(i, 60)
+        busy.begin()
+        db.update("presets", late_pin.preset["id"], {"pinned": 1})  # pinned after it started
+        self.fleet.blocked = "tuning"
+        self.assertEqual(await self.fleet.unload_idle(), [])
+        self.fleet.blocked = None
+        self.assertEqual([i.name for i in await self.fleet.unload_idle()], ["gamma"])
+        self.assertEqual(sorted(i.name for i in self.fleet.live()), ["alpha", "beta", "delta"])
+        busy.end()
+
+    async def test_status_checks_do_not_count_as_use(self):
+        a = await self.up("alpha")
+        self.idle(a, 11)
+        before = a.last_used
+        a.begin(touch=False)
+        a.end(touch=False)
+        self.assertEqual((a.last_used, a.inflight), (before, 0))
+        a.begin()
+        a.end()
+        self.assertGreater(a.last_used, before)
 
     async def test_the_tuner_block_stops_everything_from_starting(self):
         self.fleet.blocked = "tuning"

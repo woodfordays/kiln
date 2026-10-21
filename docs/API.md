@@ -255,6 +255,7 @@ es.addEventListener('status', (e) => render(JSON.parse(e.data)));
 | `tune` | Tuning run row plus `live` (`{running, tune_id, stage, trial}`) | Each tuner step, and once at the end with `status` set to `done`, `failed` or `cancelled` |
 | `tune_note` | `{"message": "..."}` | After tuning, if the previous server couldn't be restarted |
 | `download` | Download row (`id, repo, variant, status, done_bytes, total_bytes, speed, eta_s, error`), or `{id, removed: true}` | Queue changes and progress (up to twice a second). `status`: `queued`, `downloading`, `done`, `failed`, `cancelled` |
+| `idle_unload` | `{"run_id", "name", "idle_s"}` | Kiln is stopping a model because it was idle for the idle timeout. The `status` events that follow show it leaving `instances` |
 | `models` | `{"changed": true}` | The model library changed |
 | `request` | One recorded inference request (tokens, speeds, timings), or `{"reset": true}` | Every completion through the API port |
 | `log` | `{"run_id", "lines": [[ts, text, source], ...]}` | llama-server output, batched |
@@ -426,5 +427,5 @@ with `enabled: false` stays in the preset but isn't passed to llama-server. Flag
 
 | Method | Path | Body | Returns |
 |---|---|---|---|
-| GET | `/api/settings` | | `autostart_preset_ids` (started in order on boot), `swap_on_request`, `max_instances`, `retention_days`, HF token state (never the token), paths, ports |
-| PUT | `/api/settings` | Any of `hf_token`, `autostart_preset_ids`, `swap_on_request`, `max_instances`, `retention_days` | The settings |
+| GET | `/api/settings` | | `autostart_preset_ids` (started in order on boot), `swap_on_request`, `max_instances`, `idle_timeout_min` (minutes before an unused model is unloaded, default 120, `0` = never), `retention_days`, HF token state (never the token), paths, ports |
+| PUT | `/api/settings` | Any of `hf_token`, `autostart_preset_ids`, `swap_on_request`, `max_instances`, `idle_timeout_min`, `retention_days` | The settings |

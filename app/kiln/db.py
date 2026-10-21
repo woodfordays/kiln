@@ -194,6 +194,7 @@ DEFAULT_SETTINGS = {
     "retention_days": 0,  # 0 = keep forever
     "swap_on_request": True,  # an API request that names a preset loads it, making room if needed
     "max_instances": 4,  # models running at once
+    "idle_timeout_min": 120,  # a model nobody has used for this long is stopped; 0 = keep it loaded
 }
 
 

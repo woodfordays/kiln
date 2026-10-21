@@ -36,6 +36,16 @@ async def _retention_loop() -> None:
         await asyncio.sleep(6 * 3600)
 
 
+async def _idle_loop() -> None:
+    while True:
+        await asyncio.sleep(config.IDLE_CHECK_S)
+        try:
+            for inst in await manager.unload_idle():
+                log.info("idle timeout: stopped %s after %d min without a request", inst.name, inst.idle_s() // 60)
+        except Exception:
+            log.exception("idle timeout check failed")
+
+
 async def _autostart() -> None:
     """Bring up the boot presets in order. Each loads before the next starts, so the next one's
     memory check sees what the last one took."""
@@ -71,6 +81,7 @@ async def main() -> None:
         asyncio.create_task(gpu.sampler.run()),
         asyncio.create_task(hf.downloader.run()),
         asyncio.create_task(_retention_loop()),
+        asyncio.create_task(_idle_loop()),
     ]
 
     stopping = asyncio.Event()

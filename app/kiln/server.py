@@ -98,13 +98,20 @@ class Instance:
     def draining_or_stopping(self) -> bool:
         return self.draining or self.state in ("stopping", "stopped", "crashed")
 
-    def begin(self) -> None:
+    def begin(self, touch: bool = True) -> None:
+        """A request starts. `touch=False` for status checks, which must not keep a model from idling out."""
         self.inflight += 1
-        self.last_used = time.time()
+        if touch:
+            self.last_used = time.time()
 
-    def end(self) -> None:
+    def end(self, touch: bool = True) -> None:
         self.inflight = max(0, self.inflight - 1)
-        self.last_used = time.time()
+        if touch:
+            self.last_used = time.time()
+
+    def idle_s(self, now: float | None = None) -> float:
+        """Seconds since the last request finished, or since the model became ready if none came yet."""
+        return (now or time.time()) - max(self.last_used, self.ready_at or 0)
 
     def footprint_mib(self) -> int:
         return self.gpu_mib if self.gpu_mib is not None else self.need_mib
@@ -484,6 +491,26 @@ class Fleet:
 
     def max_instances(self) -> int:
         return max(1, int(db.get_settings().get("max_instances") or 4))
+
+    async def unload_idle(self) -> list[Instance]:
+        """Stops the ready models that no request has used for the idle timeout in Settings (0 = never).
+        Presets marked Keep loaded stay, and so does anything while the tuner owns the GPU."""
+        limit = float(db.get_settings().get("idle_timeout_min") or 0) * 60
+        if limit <= 0 or self.blocked:
+            return []
+        stopped = []
+        for inst in self.ready():
+            idle = inst.idle_s()
+            if inst.state != "ready" or inst.draining or inst.inflight or inst.protected or idle < limit:
+                continue  # rechecked per model: stopping the one before may have taken a while
+            fresh = get_preset(inst.preset["id"]) if inst.preset else None
+            if (fresh or inst.preset or {}).get("pinned"):
+                continue
+            inst._log(f"Stopping after {int(idle // 60)} min without a request (idle timeout in Settings)", source="kiln")
+            events.publish("idle_unload", {"run_id": inst.run_id, "name": inst.name, "idle_s": idle})
+            stopped.append(inst)
+            await inst.stop()  # no await between the check above and the state change inside, so a request can't slip in
+        return stopped
 
     def _resolve(self, model: str, rows: list[dict], preset: dict | None, role: str | None) -> tuple[str, list[dict], str]:
         if not model:

@@ -1,6 +1,7 @@
 import asyncio
 import contextlib
 import json
+import time
 import unittest
 import unittest.mock
 
@@ -25,7 +26,8 @@ class ProxyTests(unittest.IsolatedAsyncioTestCase):
         manager.blocked = None
         db.execute("DELETE FROM presets")
         db.execute("DELETE FROM requests")
-        db.set_settings({"swap_on_request": True, "max_instances": 4})
+        db.set_settings({"swap_on_request": True, "max_instances": 4, "idle_timeout_min": 10})
+        self.addCleanup(db.set_settings, {"idle_timeout_min": 120})
         self.stack = contextlib.ExitStack()
         self.addCleanup(self.stack.close)
         self.http = httpx.AsyncClient(transport=httpx.ASGITransport(app=proxy.app), base_url="http://kiln", timeout=60)
@@ -243,3 +245,20 @@ class ProxyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(a.inflight, 1)
         await task
         self.assertEqual(a.inflight, 0)
+
+    async def test_only_inference_requests_count_as_use(self):
+        a = await self.up("alpha")
+        a.last_used = 1.0
+        self.assertEqual((await self.http.get("/props")).status_code, 200)
+        self.assertEqual(a.last_used, 1.0)  # a health probe must not keep a model loaded forever
+        await self.chat("alpha")
+        self.assertGreater(a.last_used, 1.0)
+
+    async def test_a_model_unloaded_for_being_idle_loads_again_on_the_next_request(self):
+        a = await self.up("alpha")
+        a.last_used = a.ready_at = time.time() - 3600
+        self.assertEqual([i.name for i in await manager.unload_idle()], ["alpha"])
+        self.assertEqual(manager.live(), [])
+        r = await self.chat("alpha")
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual([i.name for i in manager.live()], ["alpha"])
