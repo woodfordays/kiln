@@ -28,6 +28,7 @@ export function RequestsPage() {
     { key: 'predicted_n', header: 'Generated', numeric: true, render: (r) => fmtInt(r.predicted_n) },
     { key: 'prompt_tps', header: 'Prefill t/s', numeric: true, render: (r) => fmtTps(r.prompt_tps) },
     { key: 'predicted_tps', header: 'Decode t/s', numeric: true, render: (r) => fmtTps(r.predicted_tps) },
+    { key: 'swap_ms', header: 'Model load', numeric: true, render: (r) => (isNum(r.swap_ms) ? html`<span title="Time spent waiting for the model to be loaded, not counted in TTFT">${fmtMs(r.swap_ms)}</span>` : '–') },
     { key: 'ttft_ms', header: 'TTFT', numeric: true, render: (r) => fmtMs(r.ttft_ms) },
     { key: 'total_ms', header: 'Total', numeric: true, render: (r) => fmtMs(r.total_ms) },
     { key: 'draft', header: 'Draft', numeric: true, render: (r) => (r.draft_n ? fmtPct(r.draft_accepted / r.draft_n, 0) : '–') },

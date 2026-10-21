@@ -109,6 +109,19 @@ SCHEMA = [
         error       TEXT
     );
     """,
+    # v3: several models at once. A preset says what it is for (role) and how clients name it (alias);
+    # runs remember their port, role and measured GPU footprint; requests record time spent waiting
+    # for a model to be swapped in.
+    """
+    ALTER TABLE presets ADD COLUMN role TEXT NOT NULL DEFAULT 'chat';
+    ALTER TABLE presets ADD COLUMN alias TEXT NOT NULL DEFAULT '';
+    ALTER TABLE presets ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE runs ADD COLUMN role TEXT NOT NULL DEFAULT 'chat';
+    ALTER TABLE runs ADD COLUMN port INTEGER;
+    ALTER TABLE runs ADD COLUMN gpu_mib INTEGER;
+    ALTER TABLE runs ADD COLUMN sig TEXT;
+    ALTER TABLE requests ADD COLUMN swap_ms REAL;
+    """,
 ]
 
 _conn: sqlite3.Connection | None = None
@@ -137,6 +150,7 @@ def init() -> None:
         (time.time(),),
     )
     _conn.execute("UPDATE downloads SET status='queued' WHERE status='downloading'")
+    _migrate_autostart()
     _conn.execute("UPDATE tunes SET status='interrupted', finished_at=? WHERE status='running'", (time.time(),))
 
 
@@ -176,8 +190,10 @@ def update(table: str, row_id: int, fields: dict) -> None:
 
 DEFAULT_SETTINGS = {
     "hf_token": "",
-    "autostart_preset_id": None,
+    "autostart_preset_ids": [],  # started in this order when the container starts
     "retention_days": 0,  # 0 = keep forever
+    "swap_on_request": True,  # an API request that names a preset loads it, making room if needed
+    "max_instances": 4,  # models running at once
 }
 
 
@@ -197,3 +213,14 @@ def set_settings(values: dict) -> dict:
                 (k, json.dumps(v)),
             )
     return get_settings()
+
+
+def _migrate_autostart() -> None:
+    """The single autostart preset became a list when several models could run at once."""
+    row = _conn.execute("SELECT value FROM settings WHERE key='autostart_preset_id'").fetchone()
+    if row is None:
+        return
+    old = json.loads(row[0])
+    if old and not _conn.execute("SELECT 1 FROM settings WHERE key='autostart_preset_ids'").fetchone():
+        _conn.execute("INSERT INTO settings(key, value) VALUES('autostart_preset_ids', ?)", (json.dumps([old]),))
+    _conn.execute("DELETE FROM settings WHERE key='autostart_preset_id'")

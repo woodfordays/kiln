@@ -8,7 +8,7 @@ import signal
 
 import uvicorn
 
-from . import api, config, db, flags, gpu, hf, proxy, stats
+from . import api, config, db, flags, gpu, hf, models, proxy, stats
 from .server import get_preset, manager
 from .tuner import tuner
 
@@ -37,17 +37,18 @@ async def _retention_loop() -> None:
 
 
 async def _autostart() -> None:
-    pid = db.get_settings().get("autostart_preset_id")
-    if not pid:
-        return
-    p = get_preset(int(pid))
-    if not p:
-        return
-    try:
-        log.info("autostart: preset %s", p["name"])
-        await manager.start(p["model"], p["flags"], p["env"], preset=p)
-    except Exception as e:
-        log.error("autostart failed: %s", e)
+    """Bring up the boot presets in order. Each loads before the next starts, so the next one's
+    memory check sees what the last one took."""
+    for pid in db.get_settings().get("autostart_preset_ids") or []:
+        p = get_preset(int(pid))
+        if not p:
+            continue
+        try:
+            log.info("autostart: preset %s", p["name"])
+            inst = await manager.start(p["model"], p["flags"], p["env"], preset=p, role=p["role"])
+            await inst.wait_ready(config.SWAP_TIMEOUT_S)
+        except Exception as e:
+            log.error("autostart of %s failed: %s", p["name"], e)
 
 
 async def main() -> None:
@@ -66,6 +67,7 @@ async def main() -> None:
                                 lifespan="off", access_log=False, timeout_keep_alive=30))
 
     tasks = [
+        asyncio.create_task(asyncio.to_thread(models.scan)),  # warm the header cache that memory checks read
         asyncio.create_task(gpu.sampler.run()),
         asyncio.create_task(hf.downloader.run()),
         asyncio.create_task(_retention_loop()),

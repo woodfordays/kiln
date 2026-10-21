@@ -7,6 +7,7 @@ import csv
 import io
 import json
 import os
+import re
 import secrets
 import time
 
@@ -15,8 +16,8 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Res
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import config, db, events, flags, gpu, hf, models, stats
-from .server import get_preset, manager
+from . import config, db, events, fit, flags, gpu, hf, models, roles, stats
+from .server import NoFit, get_preset, manager
 from .tuner import get_tune, tuner
 
 app = FastAPI(title="Kiln", docs_url="/api/docs", redoc_url=None, openapi_url="/api/openapi.json")
@@ -96,32 +97,72 @@ class StartBody(BaseModel):
     model: str | None = None
     flags: list[dict] = Field(default_factory=list)
     env: dict[str, str] = Field(default_factory=dict)
+    role: str | None = None
+    replace: list[int] | str | None = None  # run ids to stop first, or "auto": idle, unpinned models until it fits
+    force: bool = False  # start even if the memory estimate says it won't fit
 
 
-@app.post("/api/server/start")
-async def server_start(body: StartBody):
+def _launch_args(body: StartBody) -> dict:
+    if body.replace not in (None, "auto") and not isinstance(body.replace, list):
+        raise ValueError('replace must be a list of run ids or "auto".')
     if body.preset_id is not None:
         p = get_preset(body.preset_id)
         if not p:
             raise LookupError("That preset no longer exists.")
-        model = body.model or p["model"]
-        return await manager.start(model, p["flags"], p["env"], preset=p)
-    return await manager.start(body.model or "", body.flags, body.env)
+        return {"model": body.model or p["model"], "rows": p["flags"], "env": p["env"], "preset": p,
+                "role": body.role or p["role"]}
+    return {"model": body.model or "", "rows": body.flags, "env": body.env, "preset": None, "role": body.role}
+
+
+@app.post("/api/server/start")
+async def server_start(body: StartBody):
+    a = _launch_args(body)
+    try:
+        inst = await manager.start(a["model"], a["rows"], a["env"], preset=a["preset"], role=a["role"],
+                                   force=body.force, replace=body.replace)
+    except NoFit as e:
+        return JSONResponse({"detail": str(e), "code": "no_fit", "plan": e.plan, "evict": e.evict}, status_code=409)
+    return {**manager.status(), "started": inst.status()}
+
+
+@app.post("/api/server/plan")
+async def server_plan(body: StartBody):
+    """Whether a launch fits next to what is running, and what it would take to make room."""
+    a = _launch_args(body)
+    return manager.plan(a["model"], a["rows"], a["preset"], a["role"], body.replace)
+
+
+class RunBody(BaseModel):
+    run_id: int | None = None  # none = every server
 
 
 @app.post("/api/server/stop")
-async def server_stop():
-    return await manager.stop()
+async def server_stop(body: RunBody | None = None):
+    await manager.stop(body.run_id if body else None)
+    return manager.status()
 
 
 @app.post("/api/server/restart")
-async def server_restart():
-    return await manager.restart()
+async def server_restart(body: RunBody | None = None):
+    await manager.restart(body.run_id if body else None)
+    return manager.status()
+
+
+@app.post("/api/server/dismiss")
+async def server_dismiss(body: RunBody):
+    if body.run_id is not None:
+        manager.dismiss(body.run_id)
+    return manager.status()
 
 
 @app.get("/api/server/logs")
-async def server_logs(tail: int = 1000):
-    return {"run_id": manager.run_id, "lines": list(manager.logs)[-tail:]}
+async def server_logs(tail: int = 1000, run_id: int | None = None):
+    return manager.logs(run_id, tail)
+
+
+@app.get("/api/roles")
+async def roles_list():
+    return roles.ROLES
 
 
 @app.get("/api/runs")
@@ -154,12 +195,34 @@ class PresetBody(BaseModel):
     model: str = ""
     flags: list[dict] = Field(default_factory=list)
     env: dict[str, str] = Field(default_factory=dict)
+    role: str = "chat"
+    alias: str = ""  # the short name API clients put in "model"
+    pinned: bool = False  # never stopped to make room for another model
 
 
-def _clean_preset(body: PresetBody) -> dict:
+ALIAS_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/\- ]{0,63}")
+
+
+def _check_alias(alias: str, pid: int | None) -> None:
+    if not alias:
+        return
+    if not ALIAS_RE.fullmatch(alias):
+        raise ValueError("An alias can use letters, digits and . _ : / - and spaces, up to 64 characters.")
+    clash = db.scalar("SELECT name FROM presets WHERE id IS NOT ? AND (lower(name)=lower(?) OR lower(alias)=lower(?))",
+                      (pid, alias, alias))
+    if clash:
+        raise RuntimeError(f"“{alias}” is already used by the preset “{clash}”.")
+
+
+def _clean_preset(body: PresetBody, pid: int | None = None) -> dict:
     name = body.name.strip()
     if not name:
         raise ValueError("Give the preset a name.")
+    roles.valid(body.role)
+    alias = body.alias.strip()
+    _check_alias(alias, pid)
+    if db.scalar("SELECT 1 FROM presets WHERE id IS NOT ? AND lower(alias)=lower(?) AND alias != ''", (pid, name)):
+        raise RuntimeError(f"“{name}” is already used as an alias by another preset.")
     rows = []
     for r in body.flags:
         flag = str(r.get("flag") or "").strip()
@@ -173,12 +236,14 @@ def _clean_preset(body: PresetBody) -> dict:
         rows.append({"flag": flag, "value": None if val in (None, "") else str(val),
                      **({"enabled": False} if r.get("enabled") is False else {})})
     return {"name": name, "description": body.description.strip(), "model": body.model.strip(),
-            "flags": json.dumps(rows), "env": json.dumps({k.strip(): v for k, v in body.env.items() if k.strip()})}
+            "flags": json.dumps(rows), "env": json.dumps({k.strip(): v for k, v in body.env.items() if k.strip()}),
+            "role": body.role, "alias": alias, "pinned": int(body.pinned)}
 
 
 def _preset_out(r: dict) -> dict:
     r["flags"] = json.loads(r["flags"]) if isinstance(r["flags"], str) else r["flags"]
     r["env"] = json.loads(r["env"]) if isinstance(r["env"], str) else r["env"]
+    r["pinned"] = bool(r.get("pinned"))
     r["last_used"] = db.scalar("SELECT MAX(started_at) FROM runs WHERE preset_id=?", (r["id"],))
     r["runs"] = db.scalar("SELECT COUNT(*) FROM runs WHERE preset_id=?", (r["id"],))
     return r
@@ -204,7 +269,7 @@ async def presets_create(body: PresetBody):
 async def presets_update(pid: int, body: PresetBody):
     if not db.scalar("SELECT 1 FROM presets WHERE id=?", (pid,)):
         raise LookupError("That preset no longer exists.")
-    data = _clean_preset(body)
+    data = _clean_preset(body, pid)
     if db.scalar("SELECT 1 FROM presets WHERE name=? AND id!=?", (data["name"], pid)):
         raise RuntimeError(f"A preset named “{data['name']}” already exists.")
     db.update("presets", pid, {**data, "updated_at": time.time()})
@@ -222,7 +287,8 @@ async def presets_duplicate(pid: int):
         name, i = f"{src['name']} copy {i}", i + 1
     now = time.time()
     new_id = db.insert("presets", {"name": name, "description": src["description"], "model": src["model"],
-                                   "flags": src["flags"], "env": src["env"], "created_at": now, "updated_at": now})
+                                   "flags": src["flags"], "env": src["env"], "role": src["role"], "pinned": src["pinned"],
+                                   "created_at": now, "updated_at": now})
     events.publish("presets", {"changed": True})
     return _preset_out(db.row("SELECT * FROM presets WHERE id=?", (new_id,)))
 
@@ -230,9 +296,9 @@ async def presets_duplicate(pid: int):
 @app.delete("/api/presets/{pid}")
 async def presets_delete(pid: int):
     db.execute("DELETE FROM presets WHERE id=?", (pid,))
-    s = db.get_settings()
-    if s.get("autostart_preset_id") == pid:
-        db.set_settings({"autostart_preset_id": None})
+    ids = db.get_settings().get("autostart_preset_ids") or []
+    if pid in ids:
+        db.set_settings({"autostart_preset_ids": [i for i in ids if i != pid]})
     events.publish("presets", {"changed": True})
     return {"ok": True}
 
@@ -256,8 +322,9 @@ async def models_list():
 
 @app.delete("/api/models")
 async def models_delete(path: str):
-    if manager.state in ("loading", "ready") and models.files_for(manager.model_path)[0] == models.files_for(path)[0]:
-        raise RuntimeError("That model is loaded. Stop the server before deleting it.")
+    target = models.files_for(path)[0]
+    if any(models.files_for(i.model_path)[0] == target for i in manager.live()):
+        raise RuntimeError("That model is loaded. Stop it before deleting it.")
     removed = await asyncio.to_thread(models.delete, path)
     events.publish("models", {"changed": True})
     return {"removed": removed}
@@ -476,9 +543,12 @@ async def settings_put(values: dict):
     allowed = {}
     if "hf_token" in values:
         allowed["hf_token"] = str(values["hf_token"] or "").strip()
-    if "autostart_preset_id" in values:
-        v = values["autostart_preset_id"]
-        allowed["autostart_preset_id"] = int(v) if v not in (None, "", 0) else None
+    if "autostart_preset_ids" in values:
+        allowed["autostart_preset_ids"] = [int(v) for v in (values["autostart_preset_ids"] or [])]
+    if "swap_on_request" in values:
+        allowed["swap_on_request"] = bool(values["swap_on_request"])
+    if "max_instances" in values:
+        allowed["max_instances"] = min(16, max(1, int(values["max_instances"] or 1)))
     if "retention_days" in values:
         allowed["retention_days"] = max(0, int(values["retention_days"] or 0))
     db.set_settings(allowed)

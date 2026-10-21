@@ -14,8 +14,11 @@ are kept in SQLite, so the history survives restarts and rebuilds.
    draft acceptance) and totals (requests, tokens, time), and **retains** them.
 5. Run on AMD boxes with the **Vulkan** backend (Mesa RADV) and stay portable to other machines.
 
-Non-goals: multi-user auth, running several models at once (router mode), a chat UI. The
-built-in llama.cpp chat UI still works through the API port.
+Non-goals: multi-user auth, a chat UI. The built-in llama.cpp chat UI still works through the API port.
+
+Several models can run at once (an LLM next to an embedding or decision model), each in its own
+`llama-server` process. Kiln does this itself rather than with llama.cpp's router mode, because it needs the
+per-request stats, its own fit check and the tuner's exclusive use of the GPU.
 
 ## Architecture
 
@@ -25,14 +28,14 @@ built-in llama.cpp chat UI still works through the API port.
 ┌───────────────────────┼────────────────────────────────┼───────────────────────┐
 │ container "kiln"      ▼                                ▼                       │
 │   ┌──────────────────────────────┐   ┌───────────────────────────────────┐     │
-│   │ Control app (FastAPI)        │   │ Recording proxy (FastAPI)         │     │
-│   │  /api/*  REST + SSE events   │   │  passthrough of every path        │     │
-│   │  /       Ember web UI        │   │  reads `timings` from responses   │     │
+│   │ Control app (FastAPI)        │   │ Routing proxy (FastAPI)           │     │
+│   │  /api/*  REST + SSE events   │   │  picks the model for each request │     │
+│   │  /       Ember web UI        │   │  swaps models in, reads `timings` │     │
 │   └──────┬─────────────┬─────────┘   └──────────┬────────────────────────┘     │
-│          │ spawns/stops │ reads/writes           │ forwards to 127.0.0.1:8081   │
+│          │ spawns/stops │ reads/writes           │ forwards to 127.0.0.1:8081…  │
 │          ▼              ▼                        ▼                              │
-│   llama-server     SQLite /data/kiln.db    llama-server (Vulkan, /dev/dri)      │
-│   (child process)  presets, runs,                                               │
+│   llama-server ×N  SQLite /data/kiln.db    llama-servers (Vulkan, /dev/dri)     │
+│   (child processes) presets, runs,                                              │
 │                    requests, gpu, downloads                                     │
 └─────────────────────────────────────────────────────────────────────────────────┘
       volumes: /models ← host model dir (HF cache + downloads)   /data ← ./data
@@ -41,8 +44,8 @@ built-in llama.cpp chat UI still works through the API port.
 One container, one Python process running two uvicorn servers on one asyncio loop:
 
 - **Control app (:8090)** serves the UI and `/api`. It owns the `llama-server` child process.
-- **Recording proxy (:8080)** is the only way into `llama-server`, which binds to
-  `127.0.0.1:8081` inside the container. Every completion response passes through the proxy,
+- **Routing proxy (:8080)** is the only way into the `llama-server` processes, which bind to
+  `127.0.0.1:8081` and up inside the container, one port per running model. Every completion response passes through the proxy,
   which parses the `timings` object llama-server attaches to the final JSON body or SSE event
   (`prompt_n`, `cache_n`, `prompt_ms`, `predicted_n`, `predicted_ms`, `draft_n`,
   `draft_n_accepted`) and writes one row per request. It also measures wall time and time to
@@ -74,11 +77,15 @@ so `--spec-type draft-mtp` and the rest of your tuned flags keep working.
 | `__main__.py` | Starts the DB, background tasks and both uvicorn servers. |
 | `config.py` | Env-driven paths and ports. |
 | `db.py` | SQLite (WAL) schema, migrations, small query helpers. |
-| `server.py` | `llama-server` lifecycle: state machine, argv building, health polling, log ring buffer, run records. |
+| `server.py` | `Instance` (one `llama-server`: state machine, argv, health polling, log ring buffer, run record, measured GPU footprint) and `Fleet` (all instances: start, stop, restart, fit plan, eviction, swap-in, tuner snapshot). |
+| `roles.py` | What a preset is for (chat, embedding, reranker, decision): the flags Kiln adds and the API paths served. |
+| `route.py` | Which model answers a request: by name (alias, preset name, slug, file), by endpoint role, else the default chat model. Pure, tested. |
+| `fit.py` | Memory estimate from the GGUF header and flags, checked against free VRAM and RAM; measured footprints replace estimates. |
+| `decider.py` | Perplexity pplx-decider protocol v3 on top of `llama-server`'s per-token embeddings: prompt, readout, softmax. |
 | `flags.py` | Parses `llama-server --help` into flag metadata for autocomplete and command import. |
 | `proxy.py` | Streaming passthrough proxy with stats capture. |
 | `stats.py` | Aggregates: range summary with deltas, time buckets, depth scatter, per-model table, lifetime totals. |
-| `models.py` + `gguf.py` | Scans `/models` for GGUF files, groups split shards, reads GGUF headers (arch, context length, quant). |
+| `models.py` + `gguf.py` | Scans `/models` for GGUF files, groups split shards, reads GGUF headers (arch, context length, quant, KV geometry, decision and draft markers) and tensor rows (the decider's readout). Groups companion files (vision projector, DSpark/DFlash/EAGLE-3 drafts) with their model. |
 | `hf.py` | Resolves a Hugging Face ID to downloadable GGUF variants; resumable streaming downloader with a queue. |
 | `gpu.py` | Samples GPU busy %, VRAM, power and temperature every 2 s from amdgpu sysfs or `nvidia-smi` (all GPUs combined); keeps 10 min live, 1-minute averages in SQLite. |
 | `events.py` | Fan-out of server-sent events to open browser tabs. |
@@ -87,15 +94,34 @@ so `--spec-type draft-mtp` and the rest of your tuned flags keep working.
 
 ### llama-server lifecycle
 
-`stopped → starting → loading → ready → stopping → stopped`, with `crashed` when the process
-exits unexpectedly. `loading` is the period where `/health` returns 503. Kiln always adds
-`--host 127.0.0.1 --port 8081 --metrics` and strips any user `--host`/`--port`. Stop sends
-SIGTERM, then SIGKILL after 15 s. Each start writes a `runs` row (preset, model, argv, load time,
-context size from `/props`, exit code) and a log file under `/data/logs/`.
+Each instance goes `starting → loading → ready → stopping → stopped`, with `crashed` when its process exits
+unexpectedly (a crash stays listed with its error until dismissed or the model is started again).
+`loading` is the period where `/health` returns 503. Kiln always adds `--host 127.0.0.1 --port <free port>
+--metrics` and strips any user `--host`/`--port`; it also adds `--alias <API name>` unless the preset sets
+one, and what the role needs (`roles.apply`). Stop sends SIGTERM, then SIGKILL after 15 s. Each start writes
+a `runs` row (preset, role, port, model, argv, load time, context size from `/props`, exit code, measured
+GPU memory) and a log file under `/data/logs/`.
+
+**Starting a model** (`Fleet.start`): validate the model and role, then under one lock: refuse a preset that
+is already running, estimate whether it fits (`Fleet.plan`: free VRAM, plus what the models to be stopped
+hold, minus what models still loading have yet to take), stop the chosen models, wait for the driver to show
+the memory as free, take the next free port, spawn. `replace` is a list of run ids or `"auto"` (idle,
+unpinned, least recently used first). An unfit start raises `NoFit`, which the API returns as a 409 with the
+models that could be stopped.
+
+**Swap on request** (`Fleet.ensure`): the proxy asks for the preset a request names; one load is shared by
+every waiting request, models being stopped drain their in-flight requests first, and the proxy forwards when
+the instance is ready.
+
+**GPU footprint**: when a model is the only thing starting or stopping, Kiln compares VRAM before the spawn
+with VRAM two samples after it is ready and stores the difference on the run. `fit.check` prefers that
+number for the same model, flags and role.
 
 ### Presets
 
-A preset is `{name, description, model, flags: [{flag, value}], env: {KEY: VALUE}}`. The editor
+A preset is `{name, description, model, role, alias, pinned, flags: [{flag, value, enabled?}], env: {KEY: VALUE}}`.
+A flag row with `enabled: false` stays in the preset but is not passed to `llama-server`; the vision,
+MTP and draft-file switches work by flipping those rows. The editor
 offers autocomplete and inline help for every flag the compiled `llama-server` reports in
 `--help`, so it always matches the binary. Pasting a full `llama-server …` command imports the
 model and flags. One preset can be marked to autostart when the container starts.
@@ -150,10 +176,15 @@ dots, and a table view toggle on every chart.
 ## API surface (control port)
 
 ```
-GET  /api/status                      server state, run, uptime, endpoints
-POST /api/server/start                {preset_id} or {model, flags, env}
-POST /api/server/stop | /restart
-GET  /api/server/logs?tail=500        recent log lines
+GET  /api/status                      fleet state, `instances` (one per model), GPU memory, and the primary model's fields
+                                      (state, model, preset, n_ctx …) as before
+POST /api/server/start                {preset_id} or {model, flags, env}, plus role, replace (run ids | "auto"), force;
+                                      409 {code: "no_fit", plan, evict} when it doesn't fit
+POST /api/server/plan                 same body: does it fit, what it needs, what would be stopped
+POST /api/server/stop | /restart      {run_id} for one model; empty body = all
+POST /api/server/dismiss              {run_id} forgets a crashed model
+GET  /api/server/logs?tail=500&run_id= recent log lines of one model (default: the primary one)
+GET  /api/roles                       roles, the flags each adds, help text
 GET  /api/runs                        run history
 GET  /api/flags                       parsed --help metadata
 GET/POST/PUT/DELETE /api/presets[/id] presets CRUD; POST /api/presets/parse imports a command
@@ -163,8 +194,18 @@ GET/POST/DELETE /api/downloads[/id]   queue, start, cancel
 GET  /api/stats/{summary,timeseries,scatter,models,lifetime}?range=&model=
 GET  /api/requests?limit&offset ; /api/requests.csv
 GET  /api/gpu/live ; /api/gpu/history?range=
-GET/PUT /api/settings ; POST /api/stats/reset
+GET/PUT /api/settings                 hf_token, autostart_preset_ids, swap_on_request, max_instances, retention_days
+POST /api/stats/reset
 GET  /api/events                      SSE: state, log, request, download, gpu
+```
+
+## API surface (API port)
+
+```
+POST /v1/chat/completions … /v1/embeddings /v1/rerank   routed by `model`, X-Kiln-Model or ?model=; recorded
+POST /v1/systemone                    decision models: llama-server's own, or Kiln's decider adapter
+GET  /v1/models                       loaded models, and presets that a request could swap in
+anything else                         passed through to the default chat model
 ```
 
 ## Deployment

@@ -48,10 +48,29 @@ def _metadata(path: str, st: os.stat_result) -> dict:
     key = (path, st.st_size, int(st.st_mtime))
     if key not in _meta_cache:
         try:
-            _meta_cache[key] = gguf.summarize(gguf.read_metadata(path))
+            _meta_cache[key] = gguf.summarize(gguf.read_metadata(path, arrays=gguf.ARRAY_KEYS), os.path.basename(path))
         except Exception as e:
             _meta_cache[key] = {"error": str(e)}
     return _meta_cache[key]
+
+
+def info(path: str) -> dict:
+    """Header summary of one GGUF file (cached), or {} when it can't be read."""
+    try:
+        meta = _metadata(path, os.stat(path))
+    except OSError:
+        return {}
+    return {} if "error" in meta else meta
+
+
+def _shared_prefix(a: str, b: str) -> int:
+    """How many leading name tokens two file names share: ranks a model's companion files."""
+    n = 0
+    for x, y in zip(re.split(r"[-_.]", a.lower()), re.split(r"[-_.]", b.lower())):
+        if x != y:
+            break
+        n += 1
+    return n
 
 
 def scan_roots() -> list[Path]:
@@ -87,6 +106,7 @@ def scan() -> list[dict]:
                 singles.append(fn)
         groups = [[fn] for fn in singles] + list(shards.values())
         projectors = []
+        drafts = []
         entries = []
         for group in groups:
             first = os.path.join(dirpath, group[0])
@@ -107,14 +127,19 @@ def scan() -> list[dict]:
                 "quant": quant_from_name(group[0]) or meta.get("file_type", ""),
                 "is_projector": bool(meta.get("is_projector")) or "mmproj" in group[0].lower(),
                 **{k: meta.get(k) for k in ("arch", "size_label", "context_length", "block_count",
-                                            "expert_count", "nextn_layers", "error")},
+                                            "expert_count", "nextn_layers", "decision", "draft", "role_hint",
+                                            "error")},
                 "title": meta.get("name") or "",
             }
-            (projectors if entry["is_projector"] else entries).append(entry)
+            entry["is_draft"] = bool(entry.get("draft")) and not entry["is_projector"]
+            (projectors if entry["is_projector"] else drafts if entry["is_draft"] else entries).append(entry)
         for e in entries:
-            e["projectors"] = [p["path"] for p in projectors]
-        models.extend(entries + projectors)
-    models.sort(key=lambda m: (m["is_projector"], m["repo"].lower(), m["name"].lower()))
+            near = sorted(projectors, key=lambda p: -_shared_prefix(p["name"].removeprefix("mmproj-"), e["name"]))
+            e["projectors"] = [p["path"] for p in near]
+            e["drafts"] = [{"path": d["path"], "name": d["name"], "size": d["size"], **d["draft"]}
+                           for d in sorted(drafts, key=lambda d: -_shared_prefix(d["name"], e["name"]))]
+        models.extend(entries + projectors + drafts)
+    models.sort(key=lambda m: (m["is_projector"] or m["is_draft"], m["repo"].lower(), m["name"].lower()))
     return models
 
 

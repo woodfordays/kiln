@@ -18,7 +18,10 @@ async function request(method, url, body) {
   try { data = text ? JSON.parse(text) : null; } catch { data = text; }
   if (!r.ok) {
     const msg = (data && data.detail) ? (typeof data.detail === 'string' ? data.detail : JSON.stringify(data.detail)) : `Request failed (HTTP ${r.status}).`;
-    throw new Error(msg);
+    const err = new Error(msg);
+    err.status = r.status;
+    err.data = data; // structured answers such as a no_fit refusal carry more than the message
+    throw err;
   }
   return data;
 }
@@ -179,6 +182,20 @@ export function StateBadge({ state, size }) {
   const b = STATE_BADGE[state] || STATE_BADGE.stopped;
   return html`<${E.Badge} tone=${b.tone} live=${b.live} dot=${b.dot} icon=${b.icon} size=${size}>${b.label}<//>`;
 }
+
+/* ---------------------------------------------------------------- models that are running */
+
+export const ROLE_LABEL = { chat: 'Chat', embedding: 'Embeddings', rerank: 'Reranker', decision: 'Decision' };
+export const ROLE_TONE = { chat: 'neutral', embedding: 'info', rerank: 'info', decision: 'ember' };
+
+export function RoleBadge({ role, size = 'sm' }) {
+  return html`<${E.Badge} size=${size} tone=${ROLE_TONE[role] || 'neutral'}>${ROLE_LABEL[role] || role}<//>`;
+}
+
+/* Live llama-server processes from a status payload; crashed ones are listed separately. */
+export const liveOf = (status) => ((status && status.instances) || []).filter((i) => ['starting', 'loading', 'ready', 'stopping'].includes(i.state));
+export const crashedOf = (status) => ((status && status.instances) || []).filter((i) => i.state === 'crashed');
+export const fmtMiB = (m) => (isNum(m) ? fmtBytes(m * 2 ** 20) : '–');
 
 export function copyText(text) {
   if (navigator.clipboard && window.isSecureContext) return navigator.clipboard.writeText(text);

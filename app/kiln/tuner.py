@@ -36,7 +36,7 @@ import httpx
 from . import config, db, events, flags, gpu, models
 from .server import manager
 
-PORT = config.INTERNAL_PORT + 1
+PORT = config.TUNER_PORT
 URL = f"http://127.0.0.1:{PORT}"
 NOISE = 0.02
 PROBE_MARGIN_MIB = 128  # a benchmark needs ~100 MiB more VRAM than loading did (measured on Vulkan and ROCm)
@@ -137,11 +137,7 @@ class Tuner:
         base["flags"] = [f for f in base["flags"] if f["flag"] not in TUNED_FLAGS]
         params["base"] = base
 
-        previous = None
-        if manager.state in ("loading", "ready"):
-            previous = {"model": manager.model_path, "env": manager.env,
-                        "preset_id": manager.preset["id"] if manager.preset else None,
-                        "argv": manager.argv}
+        previous = manager.snapshot() or None  # everything running now comes back afterwards
         params["previous"] = previous
 
         self.tune_id = db.insert("tunes", {
@@ -152,7 +148,7 @@ class Tuner:
         self._filler_ids = None
         manager.blocked = "Kiln is tuning flags. The server is unavailable until it finishes or you cancel it."
         if previous:
-            await manager.stop()
+            await manager.stop()  # the tuner needs the whole GPU
         self.task = asyncio.create_task(self._run(self.tune_id, params))
         self._publish()
         return self.tune_id
@@ -326,21 +322,18 @@ class Tuner:
             events.publish("presets", {"changed": True})
 
     async def _after(self, p: dict, best: dict | None) -> None:
-        """Start the winner if asked, otherwise bring back what was running before."""
+        """Start the winner if asked, and bring back what was running before."""
         try:
+            from .server import get_preset
+            previous = p.get("previous") or []
             row = db.row("SELECT preset_id FROM tunes WHERE id=?", (self.tune_id,))
             if best and p.get("start_after") and row and row["preset_id"]:
-                from .server import get_preset
                 pr = get_preset(row["preset_id"])
-                await manager.start(pr["model"], pr["flags"], pr["env"], preset=pr)
-            elif p.get("previous"):
-                prev = p["previous"]
-                from .server import get_preset, _argv_to_rows
-                pr = get_preset(prev["preset_id"]) if prev.get("preset_id") else None
-                if pr:
-                    await manager.start(pr["model"], pr["flags"], pr["env"], preset=pr)
-                else:
-                    await manager.start(prev["model"], _argv_to_rows(prev["argv"]), prev["env"])
+                await manager.start(pr["model"], pr["flags"], pr["env"], preset=pr, role=pr["role"], force=True)
+                previous = [s for s in previous if s["model"] != p["model"]]  # the winner replaces its own model
+            errors = await manager.restore(previous)
+            if errors:
+                events.publish("tune_note", {"message": "Could not restart: " + "; ".join(errors)})
         except Exception as e:  # never let a restore failure mask the tuning result
             events.publish("tune_note", {"message": f"Could not restart the previous server: {e}"})
 

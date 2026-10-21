@@ -9,6 +9,7 @@ export function SettingsPage() {
   const [savingToken, setSavingToken] = useState(false);
   const [resetOpen, setResetOpen] = useState(false);
   const s = settings.data;
+  const boot = s ? s.autostart_preset_ids || [] : [];
 
   const save = async (patch, msg) => {
     try { await api.put('/api/settings', patch); settings.reload(); if (msg) toast({ tone: 'success', title: msg }); } catch (e) { fail(e); }
@@ -52,12 +53,30 @@ export function SettingsPage() {
         </form>
       <//>
 
+      <${E.Card} title="Models" description="How Kiln shares the GPU between models.">
+        <div className="stack">
+          <${E.Switch} label="Load models when a request names them" checked=${!!s.swap_on_request}
+            onChange=${(e) => save({ swap_on_request: e.target.checked }, e.target.checked ? 'Swapping on request is on' : 'Swapping on request is off')}
+            description="A request whose model is a preset that isn't running loads it first, stopping idle models if there isn't room. The request waits for the load; the dashboard counts that time separately." />
+          <${E.Select} label="Models at once" value=${String(s.max_instances || 4)}
+            onChange=${(e) => save({ max_instances: Number(e.target.value) }, 'Limit updated')}
+            options=${[1, 2, 3, 4, 6, 8, 12, 16].map((n) => ({ value: String(n), label: n === 1 ? '1: one model at a time' : String(n) }))}
+            hint="Kiln also checks GPU memory before it starts another model. This caps how many run even when they fit." />
+        </div>
+      <//>
+
       <${E.Card} title="Startup and history">
         <div className="stack">
-          <${E.Select} label="Start on boot" value=${s.autostart_preset_id ? String(s.autostart_preset_id) : ''}
-            onChange=${(e) => save({ autostart_preset_id: e.target.value || null }, e.target.value ? 'Autostart preset set' : 'Autostart turned off')}
-            options=${[{ value: '', label: 'Nothing, wait for me' }, ...((presets.data || []).map((p) => ({ value: String(p.id), label: p.name })))]}
-            hint="Loaded when the container starts, so the API is ready after a reboot." />
+          <div>
+            <p className="field-label text-label">Start on boot</p>
+            <div className="stack stack--sm">
+              ${(presets.data || []).length === 0 ? html`<p className="text-caption muted">No presets yet.</p>`
+                : (presets.data || []).map((p) => html`<${E.Checkbox} key=${p.id} label=${p.name} checked=${boot.includes(p.id)}
+                  onChange=${(e) => save({ autostart_preset_ids: e.target.checked ? [...boot, p.id] : boot.filter((i) => i !== p.id) },
+                    e.target.checked ? `${p.name} will start on boot` : `${p.name} won't start on boot`)} />`)}
+            </div>
+            <p className="field-hint text-caption">Loaded one after another when the container starts, in the order you ticked them, so the API is ready after a reboot. Each one has to fit next to the ones before it.</p>
+          </div>
           <${E.Select} label="Keep request history" value=${String(s.retention_days || 0)}
             onChange=${(e) => save({ retention_days: Number(e.target.value) }, 'Retention updated')}
             options=${[{ value: '0', label: 'Forever' }, { value: '365', label: '1 year' }, { value: '180', label: '6 months' }, { value: '90', label: '90 days' }, { value: '30', label: '30 days' }]}

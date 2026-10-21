@@ -2,7 +2,7 @@
 import {
   html, E, useState, useEffect, useMemo, useRef, api, useApp, useFetch, useEvent, useDebounced, useNow,
   fmtInt, fmtCompact, fmtTps, fmtMs, fmtPct, fmtDuration, fmtBytes, fmtWhen, fmtDateTime, fmtAxisTime, isNum,
-  RANGE_OPTIONS, RANGE_WORDS, PREV_WORDS, delta, StateBadge,
+  RANGE_OPTIONS, RANGE_WORDS, PREV_WORDS, delta, StateBadge, RoleBadge, liveOf,
 } from '../lib.js';
 import { LineChart, StackedColumns, Scatter, Legend, Meter, seriesColor } from '../charts.js';
 
@@ -89,33 +89,40 @@ function LiveStrip({ status }) {
   const now = useNow(1000);
   const [busy, setBusy] = useState(false);
   if (!status) return null;
-  const st = status.state;
-  const act = async (path, msg) => {
+  const live = liveOf(status);
+  const act = async (path, body, msg) => {
     setBusy(true);
-    try { await api.post(path); toast({ tone: 'success', title: msg }); refreshStatus(); } catch (e) { fail(e); } finally { setBusy(false); }
+    try { await api.post(path, body); toast({ tone: 'success', title: msg }); refreshStatus(); } catch (e) { fail(e); } finally { setBusy(false); }
   };
-  const uptime = status.ready_at && st === 'ready' ? now - status.ready_at : null;
-  return html`<section className="live" aria-label="Server">
+  if (!live.length) {
+    return html`<section className="live" aria-label="Server">
+      <div className="live__info">
+        <${StateBadge} state=${status.state} />
+        <span className="text-body muted">No model loaded. Start a preset to serve requests on port ${status.api_port}.</span>
+      </div>
+      <div className="live__actions"><${E.Button} variant="primary" icon="play" onClick=${() => go('server')}>Start server<//></div>
+    </section>`;
+  }
+  return html`<div className="stack stack--sm">${live.map((i) => html`<section key=${i.run_id} className="live" aria-label=${'Server ' + i.name}>
     <div className="live__info">
-      <${StateBadge} state=${st} />
-      ${status.model ? html`<div className="live__model">
-        <span className="text-subtitle truncate">${status.model}</span>
+      <${StateBadge} state=${i.state} />
+      <div className="live__model">
+        <span className="row"><span className="text-subtitle truncate">${i.model}</span>${live.length > 1 && html`<${RoleBadge} role=${i.role} />`}</span>
         <div className="live__meta text-caption">
-          ${status.preset && html`<span>Preset ${status.preset.name}</span>`}
-          ${isNum(status.n_ctx) && html`<span>Context ${fmtInt(status.n_ctx)}</span>`}
-          ${uptime != null && html`<span>Up ${fmtDuration(uptime)}</span>`}
-          ${st === 'loading' && status.started_at && html`<span>Loading for ${fmtDuration(now - status.started_at)}</span>`}
-          ${st === 'ready' && html`<span className="mono">:${status.api_port}/v1</span>`}
+          ${i.preset && html`<span>Preset ${i.preset.name}</span>`}
+          ${live.length > 1 && i.name !== i.model && html`<span>API name <span className="mono">${i.name}</span></span>`}
+          ${isNum(i.n_ctx) && html`<span>Context ${fmtInt(i.n_ctx)}</span>`}
+          ${i.ready_at && i.state === 'ready' && html`<span>Up ${fmtDuration(now - i.ready_at)}</span>`}
+          ${i.state === 'loading' && i.started_at && html`<span>Loading for ${fmtDuration(now - i.started_at)}</span>`}
+          ${i.state === 'ready' && live.length === 1 && html`<span className="mono">:${status.api_port}/v1</span>`}
         </div>
-      </div>` : html`<span className="text-body muted">No model loaded. Start a preset to serve requests on port ${status.api_port}.</span>`}
+      </div>
     </div>
     <div className="live__actions">
-      ${(st === 'ready' || st === 'loading') ? html`
-        <${E.Button} variant="secondary" icon="refresh" disabled=${busy} onClick=${() => act('/api/server/restart', 'Restarting llama-server')}>Restart<//>
-        <${E.Button} variant="secondary" icon="pause" disabled=${busy} onClick=${() => act('/api/server/stop', 'llama-server stopped')}>Stop<//>
-      ` : html`<${E.Button} variant="primary" icon="play" onClick=${() => go('server')}>Start server<//>`}
+      <${E.Button} variant="secondary" icon="refresh" disabled=${busy} onClick=${() => act('/api/server/restart', { run_id: i.run_id }, `Restarting ${i.name}`)}>Restart<//>
+      <${E.Button} variant="secondary" icon="pause" disabled=${busy} onClick=${() => act('/api/server/stop', { run_id: i.run_id }, `${i.name} stopped`)}>Stop<//>
     </div>
-  </section>`;
+  </section>`)}</div>`;
 }
 
 function FirstRun({ status }) {

@@ -32,7 +32,7 @@ function tuneSummary(t) {
 export function useBackgroundNotifications({ toast, dismiss, go }) {
   const tunes = useRef({});
   const downloads = useRef({});
-  const server = useRef(null);
+  const server = useRef({}); // run id -> last state we saw
   const conn = useRef({ ok: null, timer: null, toastId: null });
 
   // Toast + desktop notification, with an optional button that also closes the toast.
@@ -81,21 +81,27 @@ export function useBackgroundNotifications({ toast, dismiss, go }) {
     }
   });
 
-  // Server state changes this tab saw happen. The tuner drives its own processes while it holds the
-  // server, so those are left to the tune notifications.
+  // Model state changes this tab saw happen, per running llama-server. The tuner drives its own processes
+  // while it holds the GPU, so those are left to the tune notifications.
   const onStatus = (s) => {
-    const prev = server.current;
-    if (!s.state) return;
-    server.current = s.state;
-    if (!prev || prev === s.state || s.blocked) return;
-    if (s.state === 'ready' && prev === 'loading') {
-      const took = isNum(s.ready_at) && isNum(s.started_at) ? ` in ${fmtDuration(s.ready_at - s.started_at)}` : '';
-      notify({ tone: 'success', title: 'Server ready', description: `${s.model || 'The model'} loaded${took}.` },
-        { tag: 'server', page: 'overview' });
-    } else if (s.state === 'crashed') {
-      notify({ tone: 'danger', title: prev === 'loading' ? 'Server failed to load' : 'Server crashed', description: s.error || undefined, duration: 0 },
-        { tag: 'server', action: { label: 'Logs', run: () => go('server') } });
+    if (!s.instances) return;
+    const seen = new Set();
+    for (const i of s.instances) {
+      seen.add(i.run_id);
+      const prev = server.current[i.run_id];
+      server.current[i.run_id] = i.state;
+      if (!prev || prev === i.state || s.blocked) continue;
+      const name = i.name || i.model || 'The model';
+      if (i.state === 'ready' && (prev === 'loading' || prev === 'starting')) {
+        const took = isNum(i.ready_at) && isNum(i.started_at) ? ` in ${fmtDuration(i.ready_at - i.started_at)}` : '';
+        notify({ tone: 'success', title: s.instances.length > 1 ? `${name} ready` : 'Server ready', description: `${i.model || name} loaded${took}.` },
+          { tag: 'server-' + i.run_id, page: 'overview' });
+      } else if (i.state === 'crashed') {
+        notify({ tone: 'danger', title: prev === 'loading' || prev === 'starting' ? `${name} failed to load` : `${name} crashed`, description: i.error || undefined, duration: 0 },
+          { tag: 'server-' + i.run_id, action: { label: 'Logs', run: () => go('server') } });
+      }
     }
+    for (const id of Object.keys(server.current)) if (!seen.has(Number(id))) delete server.current[id];
   };
   useEvent('status', onStatus);
 
@@ -117,5 +123,8 @@ export function useBackgroundNotifications({ toast, dismiss, go }) {
     }
   });
 
-  return { seedStatus: (s) => { if (s && s.state && server.current == null) server.current = s.state; } };
+  return { seedStatus: (s) => {
+    if (!s || !s.instances || Object.keys(server.current).length) return;
+    for (const i of s.instances) server.current[i.run_id] = i.state;
+  } };
 }

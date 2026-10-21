@@ -99,6 +99,16 @@ def _hf_cache_has(repo: str, path: str, size: int) -> bool:
     return False
 
 
+def variant_kind(path: str) -> str:
+    """model, projector (vision) or draft (a speculative-decoding companion such as DSpark)."""
+    base = os.path.basename(path)
+    if "mmproj" in path.lower():
+        return "projector"
+    if re.search(r"(^|[-_.])(dspark|dflash|eagle3?|draft)([-_.]|$)", base, re.I):
+        return "draft"
+    return "model"
+
+
 async def resolve(text: str) -> dict:
     ref = parse_ref(text)
     repo, rev = ref["repo"], ref["revision"]
@@ -116,7 +126,7 @@ async def resolve(text: str) -> dict:
     for key, files in groups.items():
         files.sort(key=lambda f: f["path"])
         base = os.path.basename(key)
-        is_proj = "mmproj" in key.lower()
+        kind = variant_kind(key)
         size = sum(int(f.get("lfs", {}).get("size") or f.get("size") or 0) for f in files)
         local = all(
             (_local_dest(repo, f["path"]).exists() and _local_dest(repo, f["path"]).stat().st_size == int(f.get("size") or 0))
@@ -127,7 +137,7 @@ async def resolve(text: str) -> dict:
             "id": key,
             "name": re.sub(r"\.gguf$", "", base, flags=re.I),
             "quant": models.quant_from_name(base) or (key.split("/")[0] if "/" in key else ""),
-            "kind": "projector" if is_proj else "model",
+            "kind": kind,
             "files": [{"path": f["path"], "size": int(f.get("size") or 0)} for f in files],
             "size": size,
             "downloaded": local,

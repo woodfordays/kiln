@@ -1,5 +1,5 @@
 /* App shell: side nav, hash routing, live status, toasts. */
-import { html, E, useState, useEffect, useCallback, useRef, api, useEvent, AppContext, StateBadge } from './lib.js';
+import { html, E, useState, useEffect, useCallback, useRef, api, useEvent, AppContext, StateBadge, liveOf } from './lib.js';
 import { OverviewPage } from './pages/overview.js';
 import { ServerPage } from './pages/server.js';
 import { PresetsPage } from './pages/presets.js';
@@ -110,8 +110,11 @@ function App() {
         <${E.IconButton} icon=${theme === 'dark' ? 'sun' : 'moon'} label=${theme === 'dark' ? 'Use light theme' : 'Use dark theme'}
           size="sm" onClick=${() => setTheme(theme === 'dark' ? 'light' : 'dark')} />
       </div>
-      ${status && status.model && html`<span className="text-caption muted truncate" title=${status.model}>${status.model}</span>`}
-      ${status && status.preset && html`<span className="text-caption subtle truncate">${status.preset.name}</span>`}
+      ${liveOf(status).length > 1
+        ? liveOf(status).map((i) => html`<span key=${i.run_id} className="text-caption muted truncate nav-footer__model" title=${i.model}>
+            <span className=${'nav-footer__dot' + (i.state === 'ready' ? ' is-ready' : '')} aria-hidden="true"></span>${i.name}</span>`)
+        : html`${status && status.model && html`<span className="text-caption muted truncate" title=${status.model}>${status.model}</span>`}
+          ${status && status.preset && html`<span className="text-caption subtle truncate">${status.preset.name}</span>`}`}
     </div>
   </div>`;
 

@@ -1,8 +1,9 @@
 /* Models: download from Hugging Face, watch the queue, browse and prune the local library. */
 import {
   html, E, useState, useEffect, useMemo, useRef, api, useApp, useFetch, useEvent, useNow,
-  fmtInt, fmtBytes, fmtCompact, fmtDuration, fmtWhen, copyText,
+  fmtInt, fmtBytes, fmtCompact, fmtDuration, fmtWhen, copyText, liveOf,
 } from '../lib.js';
+import { DRAFT_LABEL } from '../features.js';
 
 export function ModelsPage() {
   const library = useFetch('/api/models');
@@ -69,7 +70,8 @@ function DownloadCard() {
       <input type="checkbox" checked=${picked.has(v.id)} onChange=${() => toggle(v.id)} aria-label=${'Select ' + v.name} /></span>` },
     { key: 'name', header: 'File', render: (v) => html`<div className="cell-main"><span className="mono">${v.name}</span>
       ${v.files.length > 1 && html`<span className="cell-sub text-caption">${v.files.length} parts</span>`}</div>` },
-    { key: 'quant', header: 'Quant', render: (v) => (v.kind === 'projector' ? html`<${E.Badge} size="sm" tone="info">Vision projector<//>` : v.quant || '–') },
+    { key: 'quant', header: 'Quant', render: (v) => (v.kind === 'projector' ? html`<${E.Badge} size="sm" tone="info">Vision projector<//>`
+      : v.kind === 'draft' ? html`<${E.Badge} size="sm" tone="info">Draft model<//>` : v.quant || '–') },
     { key: 'size', header: 'Size', numeric: true, sortable: true, render: (v) => fmtBytes(v.size) },
     { key: 'downloaded', header: '', align: 'end', render: (v) => (v.downloaded ? html`<${E.Badge} size="sm" tone="success" icon="check-circle">On disk<//>` : null) },
   ];
@@ -137,6 +139,12 @@ function QueueCard() {
 
 /* ------------------------------------------------------------------ library */
 
+function decisionNote(d) {
+  if (d.kind === 'pplx-v3') return 'Perplexity decider (protocol v3). Kiln scores it through llama-server; stock llama-server cannot.';
+  if (d.kind === 'native') return 'llama-server serves this one itself at /v1/systemone.';
+  return 'Decision protocol ' + d.protocol + ' is not supported.';
+}
+
 function LibraryCard({ data, reload, loading }) {
   const { go, toast, fail, status } = useApp();
   const [deleting, setDeleting] = useState(null);
@@ -148,7 +156,7 @@ function LibraryCard({ data, reload, loading }) {
     return f ? models.filter((m) => (m.name + ' ' + m.repo + ' ' + m.arch).toLowerCase().includes(f)) : models;
   }, [models, filter]);
   const total = models.reduce((a, m) => a + m.size, 0);
-  const loaded = status && status.model_path;
+  const loadedPaths = new Set(liveOf(status).map((i) => i.model_path));
 
   const remove = async () => {
     try { const r = await api.del('/api/models?path=' + encodeURIComponent(deleting.path)); toast({ title: `Deleted ${deleting.name}`, description: `${r.removed.length} file${r.removed.length === 1 ? '' : 's'} removed.` }); setDeleting(null); reload(); }
@@ -157,10 +165,17 @@ function LibraryCard({ data, reload, loading }) {
 
   const columns = [
     { key: 'name', header: 'Model', sortable: true, render: (m) => html`<div className="cell-main">
-      <span className="row">${m.name}${m.path === loaded && html`<${E.Badge} size="sm" tone="success" live>Loaded<//>`}
+      <span className="row">${m.name}${loadedPaths.has(m.path) && html`<${E.Badge} size="sm" tone="success" live>Loaded<//>`}
         ${m.is_projector && html`<${E.Badge} size="sm" tone="info">Vision projector<//>`}
+        ${m.is_draft && html`<${E.Badge} size="sm" tone="info">${DRAFT_LABEL[m.draft.type] || 'Draft'} draft<//>`}
+        ${m.decision && html`<${E.Badge} size="sm" tone="ember" title=${decisionNote(m.decision)}>Decision model<//>`}
+        ${!m.is_projector && !m.is_draft && m.role_hint === 'embedding' && html`<${E.Badge} size="sm" tone="neutral">Embeddings<//>`}
+        ${!m.is_projector && !m.is_draft && m.role_hint === 'rerank' && html`<${E.Badge} size="sm" tone="neutral">Reranker<//>`}
+        ${m.nextn_layers > 0 && html`<${E.Badge} size="sm" tone="neutral" title="Has a multi-token prediction head">MTP<//>`}
         ${!m.complete && html`<${E.Badge} size="sm" tone="warning" icon="alert-triangle">Missing parts<//>`}</span>
-      <span className="cell-sub text-caption">${m.repo || m.path.split('/').slice(-2, -1)[0]}</span>
+      <span className="cell-sub text-caption">${[m.repo || m.path.split('/').slice(-2, -1)[0],
+        ...(m.projectors && m.projectors.length ? ['+ vision projector'] : []),
+        ...((m.drafts || []).map((d) => `+ ${DRAFT_LABEL[d.type] || 'draft'} file`))].join(' · ')}</span>
     </div>` },
     { key: 'quant', header: 'Quant', sortable: true },
     { key: 'arch', header: 'Arch', sortable: true, render: (m) => [m.arch, m.size_label].filter(Boolean).join(' · ') || '–' },
@@ -169,7 +184,7 @@ function LibraryCard({ data, reload, loading }) {
     { key: 'mtime', header: 'Added', sortable: true, render: (m) => html`<span className="nowrap">${fmtWhen(m.mtime, now)}</span>` },
     { key: 'actions', header: '', align: 'end', render: (m) => html`<div className="row" style=${{ justifyContent: 'flex-end', flexWrap: 'nowrap' }}>
       <${E.IconButton} icon="copy" size="sm" label="Copy path" onClick=${() => copyText(m.path).then(() => toast({ title: 'Path copied' }))} />
-      ${!m.is_projector && html`<${E.IconButton} icon="plus" size="sm" label="Create a preset" onClick=${() => go('presets', 'new/' + encodeURIComponent(m.path))} />`}
+      ${!m.is_projector && !m.is_draft && html`<${E.IconButton} icon="plus" size="sm" label="Create a preset" onClick=${() => go('presets', 'new/' + encodeURIComponent(m.path))} />`}
       <${E.IconButton} icon="trash" size="sm" label=${'Delete ' + m.name} onClick=${() => setDeleting(m)} />
     </div>` },
   ];

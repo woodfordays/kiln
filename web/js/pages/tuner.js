@@ -1,5 +1,5 @@
 /* Tuner: measure flag candidates in a fixed order, keep the winner, save it as a preset. */
-import { html, E, useState, useEffect, useMemo, api, useApp, useFetch, useEvent, useNow, fmtInt, fmtTps, fmtPct, fmtBytes, fmtWhen, fmtDuration, isNum, commandLine, modelLabel } from '../lib.js';
+import { html, E, useState, useEffect, useMemo, api, useApp, useFetch, useEvent, useNow, fmtInt, fmtTps, fmtPct, fmtBytes, fmtWhen, fmtDuration, isNum, commandLine, modelLabel, liveOf } from '../lib.js';
 import { askDesktopPermission } from '../notify.js';
 
 const CTX_OPTIONS = [4096, 8192, 16384, 32768, 65536, 131072, 196608, 262144];
@@ -98,7 +98,7 @@ function TuneForm({ status, onStarted }) {
     if (o === 'context' && ctxOpts.length) setCtx(ctxOpts[ctxOpts.length - 1].value);
   };
   const candidates = estimate({ objective, mode, kv_policy: kvPolicy, vary_batch: varyBatch, speculative }, m && m.nextn_layers);
-  const running = status && (status.state === 'ready' || status.state === 'loading');
+  const running = liveOf(status).length > 0;
 
   const start = async () => {
     askDesktopPermission();
@@ -163,7 +163,7 @@ function TuneForm({ status, onStarted }) {
           <${E.Checkbox} label="Start the winning preset when done" checked=${startAfter} onChange=${(e) => setStartAfter(e.target.checked)} />
         </div>
       </div>
-      ${running && html`<${E.Alert} tone="warning" title="The running model stops while tuning.">
+      ${running && html`<${E.Alert} tone="warning" title=${liveOf(status).length > 1 ? 'The running models stop while tuning.' : 'The running model stops while tuning.'}>
         ${startAfter ? 'The winner starts when tuning finishes.' : 'It starts again when tuning finishes.'} The API port answers 503 in between.
       <//>`}
       <div className="row row--between">
@@ -199,7 +199,7 @@ function TuneResult({ tune, live }) {
   const first = trials.find((t) => t.ok);
   const best = tune.best;
   const startPreset = async () => {
-    try { await api.post('/api/server/stop'); await api.post('/api/server/start', { preset_id: tune.preset_id }); refreshStatus(); go('server'); }
+    try { await api.post('/api/server/start', { preset_id: tune.preset_id, replace: 'auto' }); refreshStatus(); go('server'); }
     catch (e) { fail(e, 'Could not start the preset'); }
   };
   const columns = [

@@ -247,5 +247,5 @@ def purge(retention_days: int) -> int:
 
 CSV_COLUMNS = ["id", "ts", "model", "preset_name", "endpoint", "status", "stream", "client", "prompt_n", "cache_n",
                "predicted_n", "prompt_ms", "predicted_ms", "prompt_tps", "predicted_tps", "ttft_ms", "ttfb_ms",
-               "total_ms", "draft_n", "draft_accepted", "finish_reason", "power_w", "error", "run_id"]
+               "total_ms", "draft_n", "draft_accepted", "finish_reason", "power_w", "error", "run_id", "swap_ms"]
 
