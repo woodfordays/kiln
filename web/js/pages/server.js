@@ -88,8 +88,7 @@ function StartCard({ status, presets, busy, act }) {
   const running = status.state === 'ready' || status.state === 'loading';
   const verb = running ? 'Switch to' : 'Start';
   const start = async (body) => {
-    if (running) await api.post('/api/server/stop');
-    await api.post('/api/server/start', body);
+    await api.post('/api/server/start', { ...body, replace: true });
   };
   const startPreset = () => act(() => start({ preset_id: Number(presetId) }), running ? 'Switching model' : 'Starting llama-server');
   const startCustom = () => act(async () => {

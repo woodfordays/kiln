@@ -43,8 +43,7 @@ export function PresetsPage({ arg }) {
 
   const start = async (p) => {
     try {
-      if (status && (status.state === 'ready' || status.state === 'loading')) await api.post('/api/server/stop');
-      await api.post('/api/server/start', { preset_id: p.id });
+      await api.post('/api/server/start', { preset_id: p.id, replace: true });
       toast({ tone: 'success', title: `Starting ${p.name}` });
       refreshStatus();
       go('server');

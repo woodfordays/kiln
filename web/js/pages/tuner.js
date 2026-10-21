@@ -199,7 +199,7 @@ function TuneResult({ tune, live }) {
   const first = trials.find((t) => t.ok);
   const best = tune.best;
   const startPreset = async () => {
-    try { await api.post('/api/server/stop'); await api.post('/api/server/start', { preset_id: tune.preset_id }); refreshStatus(); go('server'); }
+    try { await api.post('/api/server/start', { preset_id: tune.preset_id, replace: true }); refreshStatus(); go('server'); }
     catch (e) { fail(e, 'Could not start the preset'); }
   };
   const columns = [

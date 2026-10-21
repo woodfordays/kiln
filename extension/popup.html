@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <title>Kiln</title>
+  <meta name="color-scheme" content="dark light">
+  <script src="lib/theme.js"></script>
+  <link rel="stylesheet" href="css/tokens.css">
+  <link rel="stylesheet" href="css/ext.css">
+</head>
+<body class="popup">
+  <header class="bar">
+    <span class="brand" aria-hidden="true"></span>
+    <div class="bar__titles">
+      <span class="bar__name">Kiln</span>
+      <span class="bar__host text-caption" id="host"></span>
+    </div>
+    <button class="icon-btn" id="open" type="button" title="Open Kiln" aria-label="Open Kiln"></button>
+    <button class="icon-btn" id="settings" type="button" title="Settings" aria-label="Settings"></button>
+  </header>
+  <div id="notice" class="notice" role="alert" hidden></div>
+  <main id="main" aria-live="polite"></main>
+  <footer id="foot"></footer>
+  <script type="module" src="popup.js"></script>
+</body>
+</html>

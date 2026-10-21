@@ -74,16 +74,20 @@ class ServerManager:
 
     # ------------------------------------------------------------ control
 
-    async def start(self, model: str, flag_rows: list[dict], env: dict | None = None, preset: dict | None = None) -> dict:
+    async def start(self, model: str, flag_rows: list[dict], env: dict | None = None, preset: dict | None = None,
+                    replace: bool = False) -> dict:
+        """Start llama-server. With replace, stop whatever is running first (one call to switch)."""
         async with self._lock:
             if self.blocked:
                 raise RuntimeError(self.blocked)
-            if self.state in ("loading", "ready", "stopping"):
-                raise RuntimeError("The server is already running. Stop it first, or use restart.")
             if not model:
                 raise ValueError("Choose a model to load.")
             if not Path(model).exists():
                 raise FileNotFoundError(f"Model file not found: {model}")
+            if self.state in ("loading", "ready", "stopping"):
+                if not replace:
+                    raise RuntimeError("The server is already running. Stop it first, or use restart.")
+                await self._stop()
             await self._spawn(model, flag_rows, env or {}, preset)
             return self.status()
 

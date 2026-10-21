@@ -11,15 +11,20 @@ Ember design. It builds for **AMD/Intel GPUs (Vulkan)** or **NVIDIA GPUs (CUDA)*
 - **Hugging Face downloads**: enter `org/repo`, `org/repo:Q4_K_M` or a huggingface.co link,
   pick a quant (split files and vision projectors are grouped for you), and watch it download
   with resume support.
-- **Tuner**: pick a model and a target context, and Kiln measures flag candidates in a fixed
-  order (KV cache type, flash attention, batch size, MTP speculative decoding) with a fixed,
-  greedy benchmark, keeps a change only if it wins by more than 2%, and saves the winner as a preset.
+- **Tuner**: pick a model, a target context and what to optimize for, and Kiln measures flag
+  combinations (KV cache type, flash attention, batch size, MTP speculative decoding, or how much
+  of the model to keep in system RAM) with a fixed, greedy benchmark, and saves the winner as a preset.
+- **Control API** for scripts and browser extensions: one call for a status-and-presets snapshot,
+  one call to switch presets, token auth, and live events. Reference: [docs/API.md](docs/API.md).
+- **Browser extension** for Zen and Firefox ([extension/](extension/README.md)): see what's running,
+  switch presets, stop or restart from the toolbar, with a status badge and notifications.
 - **Dashboard**: decode and prefill speed, time to first token, decode speed by context depth,
   tokens per period, draft acceptance for speculative decoding, GPU VRAM, power and load, per-model
   breakdowns and all-time totals. Every request is stored in SQLite under `./data`, so the
   history survives restarts, rebuilds and upgrades.
 
-Design and architecture notes are in [docs/DESIGN.md](docs/DESIGN.md).
+Design and architecture notes are in [docs/DESIGN.md](docs/DESIGN.md); the control API is
+documented in [docs/API.md](docs/API.md).
 
 ## Quick start
 
@@ -45,7 +50,7 @@ Then open:
 
 | | URL | |
 |---|---|---|
-| Control panel | `http://<host>:8090` | Ember UI |
+| Control panel | `http://<host>:8090` | Ember UI; control API under `/api` ([docs/API.md](docs/API.md)) |
 | API | `http://<host>:8080/v1` | OpenAI-compatible; also serves llama.cpp's own chat UI at `/` |
 
 Point any OpenAI client at the API port. Kiln forwards every request to llama-server and
@@ -64,7 +69,9 @@ records the `timings` llama-server returns, so the dashboard counts every client
 | `VIDEO_GID`, `RENDER_GID` | `44`, `993` | AMD only: host groups that own `/dev/dri` (`getent group video render`). |
 | `KILN_BIND` | `0.0.0.0` | Interface to publish on. Use `127.0.0.1` to keep it on this box. |
 | `KILN_UI_PORT`, `KILN_API_PORT` | `8090`, `8080` | Host ports. |
-| `KILN_UI_PASSWORD` | empty | Turns on HTTP Basic auth for the control panel (user `kiln`). |
+| `KILN_UI_PASSWORD` | empty | Turns on auth for the control panel and its API: HTTP Basic, user `kiln`. |
+| `KILN_API_TOKEN` | empty | With auth on, also accepts `Authorization: Bearer <token>`, for scripts and the browser extension. |
+| `KILN_CORS_ORIGINS` | browser extensions | Regex of origins allowed to call `/api` cross-origin. The default admits `moz-extension://` and `chrome-extension://`, no websites. |
 | `HF_TOKEN` | empty | Token for gated models. You can also save one in Settings, or rely on `huggingface-cli login` stored in `<MODELS_DIR>/hf/token`. |
 | `LLAMA_CPP_REF` | `ff0dbb975…` | llama.cpp commit, tag or branch to build. |
 
@@ -73,12 +80,20 @@ enforces it and Kiln passes the header through.
 
 ## How the tuner decides
 
-1. **KV cache**: tries `f16/f16`, `q8_0/q8_0`, `q8_0/q4_0`, `q4_0/q4_0` at full offload and keeps the
-   first that loads at the target context with at least 512 MiB of VRAM to spare. KV precision is
-   never traded for speed. If nothing fits fully, it repeats with `--fit on` to offload part of the model.
-2. **Flash attention** (`off`, `auto`), only when the V cache is f16.
-3. **Physical batch** `-ub` 256 / 512 / 1024 / 2048.
-4. **MTP self-speculative decoding**, `--spec-draft-n-max` 1 to 5, when the GGUF has an MTP head.
+Every search starts with the **KV cache**: it tries `f16/f16`, `q8_0/q8_0`, `q8_0/q4_0`, `q4_0/q4_0`
+at full offload and keeps the first that loads at the target context with at least 512 MiB of VRAM
+to spare, so KV precision is never traded for speed (*Every type that fits* keeps all of them as
+candidates instead). If nothing fits fully, it repeats with `--fit on` to offload part of the model.
+Then, depending on the search:
+
+- **Every combination** (default): runs every combination of the fitting KV types, flash attention
+  (`on`, `off`, `auto`; only `on` for a quantized V cache), physical batch `-ub` 256 / 512 / 1024 /
+  2048 (plus `-b` variants with *Also vary the logical batch*) and, when the GGUF has an MTP head,
+  `--spec-draft-n-max` 1 to 5. A configuration that doesn't fit skips the ones that need more memory.
+  The best three are measured again and ranked by the mean of both runs; the simplest finalist wins
+  unless another beats it by more than 2%.
+- **One flag at a time**: flash attention (`off`, `auto`), then `-ub`, then MTP draft length, each
+  change kept only if it beats the current best by more than 2%.
 
 **Optimize for: Context length** works differently. The target context is the requirement, and
 model weights may spill out of VRAM into system RAM to reach it, so the KV cache and the full
@@ -149,7 +164,7 @@ The web UI is plain ES modules with React 18, htm and the Ember component bundle
 
 | Path | What |
 |---|---|
-| `data/kiln.db` | SQLite: presets, runs, requests, GPU minutes, downloads, settings |
+| `data/kiln.db` | SQLite: presets, runs, tuning runs, requests, GPU minutes, downloads, settings |
 | `data/logs/run-<id>.log` | Full llama-server output per run |
 | `data/cache/` | Mesa shader cache |
 

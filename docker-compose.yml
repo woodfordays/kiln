@@ -23,6 +23,8 @@ services:
       KILN_PUBLIC_UI_PORT: ${KILN_UI_PORT:-8090}
       KILN_PUBLIC_API_PORT: ${KILN_API_PORT:-8080}
       KILN_UI_PASSWORD: ${KILN_UI_PASSWORD:-}
+      KILN_API_TOKEN: ${KILN_API_TOKEN:-}
+      KILN_CORS_ORIGINS: ${KILN_CORS_ORIGINS:-}
       HF_TOKEN: ${HF_TOKEN:-}
     volumes:
       - ${MODELS_DIR:-/opt/models}:/models
