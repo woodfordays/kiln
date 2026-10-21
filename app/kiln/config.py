@@ -51,6 +51,12 @@ PUBLIC_UI_PORT = int(_env("KILN_PUBLIC_UI_PORT", str(UI_PORT)))
 
 UI_USER = _env("KILN_UI_USER", "kiln")
 UI_PASSWORD = os.environ.get("KILN_UI_PASSWORD", "")
+# A second credential for scripts and the browser extension (Authorization: Bearer <token>), so
+# they don't need the UI password. Only checked when KILN_UI_PASSWORD turns auth on.
+API_TOKEN = os.environ.get("KILN_API_TOKEN", "")
+# Origins allowed to call /api from another origin (CORS), as a regex. The default admits browser
+# extensions (Firefox/Zen moz-extension://, Chromium chrome-extension://) and no websites.
+CORS_ORIGINS = _env("KILN_CORS_ORIGINS", r"^(moz|chrome)-extension://[0-9a-zA-Z-]+$")
 
 HF_HOME = Path(_env("HF_HOME", str(MODELS_DIR / "hf")))
 HF_ENDPOINT = _env("HF_ENDPOINT", "https://huggingface.co").rstrip("/")

@@ -12,9 +12,12 @@ are kept in SQLite, so the history survives restarts and rebuilds.
 3. Enter a **Hugging Face model ID**, pick a quant, and have it downloaded with live progress.
 4. A **dashboard** that visualizes inference performance (decode/prefill speed, TTFT, depth,
    draft acceptance) and totals (requests, tokens, time), and **retains** them.
-5. Run on AMD boxes with the **Vulkan** backend (Mesa RADV) and stay portable to other machines.
+5. Run on AMD/Intel boxes with the **Vulkan** backend (Mesa RADV) or on NVIDIA with **CUDA**, and stay
+   portable to other machines.
+6. **Tune** flags per model and box, and save the winner as a preset.
+7. A documented **control API** that other clients (scripts, a browser extension) can use.
 
-Non-goals: multi-user auth, a chat UI. The built-in llama.cpp chat UI still works through the API port.
+Non-goals: multi-user accounts, a chat UI. The built-in llama.cpp chat UI still works through the API port.
 
 Several models can run at once (an LLM next to an embedding or decision model), each in its own
 `llama-server` process. Kiln does this itself rather than with llama.cpp's router mode, because it needs the
@@ -34,8 +37,8 @@ per-request stats, its own fit check and the tuner's exclusive use of the GPU.
 │   └──────┬─────────────┬─────────┘   └──────────┬────────────────────────┘     │
 │          │ spawns/stops │ reads/writes           │ forwards to 127.0.0.1:8081…  │
 │          ▼              ▼                        ▼                              │
-│   llama-server ×N  SQLite /data/kiln.db    llama-servers (Vulkan, /dev/dri)     │
-│   (child processes) presets, runs,                                              │
+│   llama-server ×N  SQLite /data/kiln.db    llama-servers (Vulkan or CUDA)       │
+│   (child processes) presets, runs, tunes,                                       │
 │                    requests, gpu, downloads                                     │
 └─────────────────────────────────────────────────────────────────────────────────┘
       volumes: /models ← host model dir (HF cache + downloads)   /data ← ./data
@@ -43,7 +46,10 @@ per-request stats, its own fit check and the tuner's exclusive use of the GPU.
 
 One container, one Python process running two uvicorn servers on one asyncio loop:
 
-- **Control app (:8090)** serves the UI and `/api`. It owns the `llama-server` child process.
+- **Control app (:8090)** serves the UI and `/api`. It owns the `llama-server` child processes.
+  The UI is one client of `/api`; scripts and the Zen/Firefox extension in `extension/` are
+  others (see [API.md](API.md)). The extension is plain MV3 with no build step: a popup for quick
+  actions, a background event page that polls `/api/quick` for the toolbar badge and notifications.
 - **Routing proxy (:8080)** is the only way into the `llama-server` processes, which bind to
   `127.0.0.1:8081` and up inside the container, one port per running model. Every completion response passes through the proxy,
   which parses the `timings` object llama-server attaches to the final JSON body or SSE event
@@ -88,9 +94,9 @@ so `--spec-type draft-mtp` and the rest of your tuned flags keep working.
 | `models.py` + `gguf.py` | Scans `/models` for GGUF files, groups split shards, reads GGUF headers (arch, context length, quant, KV geometry, decision and draft markers) and tensor rows (the decider's readout). Groups companion files (vision projector, DSpark/DFlash/EAGLE-3 drafts) with their model. |
 | `hf.py` | Resolves a Hugging Face ID to downloadable GGUF variants; resumable streaming downloader with a queue. |
 | `gpu.py` | Samples GPU busy %, VRAM, power and temperature every 2 s from amdgpu sysfs or `nvidia-smi` (all GPUs combined); keeps 10 min live, 1-minute averages in SQLite. |
-| `events.py` | Fan-out of server-sent events to open browser tabs. |
+| `events.py` | Fan-out of server-sent events to open browser tabs and other `/api/events` clients. |
 | `tuner.py` | Flag tuner: fixed candidate order and benchmark, 2% keep margin, saves the winner as a preset. The context-length objective bisects the smallest spill of weights to system RAM (`--n-cpu-moe` or `-ngl`) that fits the target context. |
-| `api.py` | REST routes for the UI. |
+| `api.py` | REST routes, auth (Basic or Bearer token) and CORS for extension origins. Reference: [API.md](API.md). |
 
 ### llama-server lifecycle
 
@@ -105,8 +111,8 @@ GPU memory) and a log file under `/data/logs/`.
 **Starting a model** (`Fleet.start`): validate the model and role, then under one lock: refuse a preset that
 is already running, estimate whether it fits (`Fleet.plan`: free VRAM, plus what the models to be stopped
 hold, minus what models still loading have yet to take), stop the chosen models, wait for the driver to show
-the memory as free, take the next free port, spawn. `replace` is a list of run ids or `"auto"` (idle,
-unpinned, least recently used first). An unfit start raises `NoFit`, which the API returns as a 409 with the
+the memory as free, take the next free port, spawn. `replace` is `true` (stop every other model first, under the same lock, so one request switches between
+presets: what the extension sends), a list of run ids, or `"auto"` (idle, unpinned, least recently used first). An unfit start raises `NoFit`, which the API returns as a 409 with the
 models that could be stopped.
 
 **Swap on request** (`Fleet.ensure`): the proxy asks for the preset a request names; one load is shared by
@@ -166,8 +172,12 @@ Instrument Sans for UI and numbers, JetBrains Mono for flags, paths and logs.
 
 **Server**: status, start/stop/restart, the exact command line, live log tail, run history.
 **Presets**: list, editor, import. **Models**: library, Hugging Face download, queue with progress.
-**Requests**: full request log, paged, with CSV export. **Settings**: HF token, autostart,
-retention, export and reset.
+**Tuner**: new run, live progress, every trial, run history. **Requests**: full request log,
+paged, with CSV export. **Settings**: HF token, autostart, retention, export and reset.
+
+Toasts report actions you take and things that finish in the background (tuning runs,
+downloads, the server becoming ready or crashing, the live connection dropping), with a desktop
+notification as well when the tab is hidden and permission was given.
 
 Charts are hand-rolled SVG React components (no CDN dependency, offline-safe): 2 px lines,
 10% area washes, hairline grids, crosshair tooltips on lines, per-mark tooltips on bars and
@@ -175,28 +185,33 @@ dots, and a table view toggle on every chart.
 
 ## API surface (control port)
 
+Everything the UI does goes through `/api` on the control port, so it is also the API for scripts
+and the browser extension. The full reference, with auth, CORS, quick actions, events and every
+route, is [API.md](API.md). In short:
+
 ```
-GET  /api/status                      fleet state, `instances` (one per model), GPU memory, and the primary model's fields
-                                      (state, model, preset, n_ctx …) as before
-POST /api/server/start                {preset_id} or {model, flags, env}, plus role, replace (run ids | "auto"), force;
+GET  /api/quick                       compact snapshot for quick-action clients (adds `instances`)
+GET  /api/status                      fleet state, `instances` (one per model), GPU memory, llama.cpp build, backend, and the
+                                      primary model's fields (state, model, preset, n_ctx …) as before
+POST /api/server/start                {preset_id} or {model, flags, env}, plus role, force and replace (true | run ids | "auto");
                                       409 {code: "no_fit", plan, evict} when it doesn't fit
 POST /api/server/plan                 same body: does it fit, what it needs, what would be stopped
 POST /api/server/stop | /restart      {run_id} for one model; empty body = all
 POST /api/server/dismiss              {run_id} forgets a crashed model
 GET  /api/server/logs?tail=500&run_id= recent log lines of one model (default: the primary one)
+GET  /api/runs ; /api/runs/{id}/log
 GET  /api/roles                       roles, the flags each adds, help text
-GET  /api/runs                        run history
 GET  /api/flags                       parsed --help metadata
-GET/POST/PUT/DELETE /api/presets[/id] presets CRUD; POST /api/presets/parse imports a command
-GET  /api/models                      library scan; DELETE /api/models?path=
+GET/POST/PUT/DELETE /api/presets[/id] presets CRUD; /duplicate; POST /api/presets/parse
+GET  /api/models ; DELETE /api/models?path=
 GET  /api/hf/resolve?id=              variants for a Hugging Face ID
-GET/POST/DELETE /api/downloads[/id]   queue, start, cancel
-GET  /api/stats/{summary,timeseries,scatter,models,lifetime}?range=&model=
-GET  /api/requests?limit&offset ; /api/requests.csv
-GET  /api/gpu/live ; /api/gpu/history?range=
+GET/POST/DELETE /api/downloads[/id]   queue, start, forget; /cancel, /retry
+POST /api/tune ; /api/tune/cancel ; GET /api/tune[/id]
+GET  /api/stats/{summary,timeseries,scatter,models,lifetime,slots}?range=&model=
+GET  /api/requests ; /api/requests.csv ; GET /api/gpu/{live,history}
 GET/PUT /api/settings                 hf_token, autostart_preset_ids, swap_on_request, max_instances, retention_days
 POST /api/stats/reset
-GET  /api/events                      SSE: state, log, request, download, gpu
+GET  /api/events                      SSE: status, presets, tune, tune_note, download, models, request, log, gpu
 ```
 
 ## API surface (API port)
@@ -214,8 +229,8 @@ anything else                         passed through to the default chat model
   `http://host:8080/v1`).
 - Volumes: `${MODELS_DIR}` → `/models` (defaults to `/opt/models`, which already holds the HF
   cache), `./data` → `/data` (SQLite + logs).
-- `.env` holds UID/GID, the `video`/`render` GIDs, ports, the models path and an optional UI
-  password (HTTP Basic).
+- `.env` holds UID/GID, the `video`/`render` GIDs, ports, the models path, an optional UI
+  password (HTTP Basic), an optional API token for scripts and the extension, and the CORS origins.
 
 ## Build plan
 

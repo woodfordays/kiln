@@ -544,7 +544,7 @@ class Fleet:
         roles.apply(role, model, rows)  # fail early on a role the model cannot take
         async with self._start_lock:
             running = self.by_preset(preset["id"]) if preset else None
-            if running:
+            if running and not (isinstance(replace, list) and running.run_id in replace):
                 if reuse:
                     return running
                 raise RuntimeError(f"{preset['name']} is already running.")

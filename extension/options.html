@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <title>Kiln extension settings</title>
+  <meta name="color-scheme" content="dark light">
+  <script src="lib/theme.js"></script>
+  <link rel="stylesheet" href="css/tokens.css">
+  <link rel="stylesheet" href="css/ext.css">
+</head>
+<body class="options">
+  <div class="options__inner">
+    <header class="row">
+      <span class="brand" aria-hidden="true" style="width:32px;height:32px"></span>
+      <h1>Kiln extension</h1>
+    </header>
+
+    <form class="card" id="form" novalidate>
+      <div>
+        <h2>Connection</h2>
+        <p class="field__hint">The control panel of your Kiln box, the same address you open in the browser.</p>
+      </div>
+      <label class="field">
+        <span class="field__label">Kiln URL</span>
+        <span class="input-wrap"><input id="base" type="text" inputmode="url" autocomplete="off" spellcheck="false" placeholder="http://ai-box:8090"></span>
+      </label>
+      <label class="field">
+        <span class="field__label">API token <span class="subtle" style="font-weight:400">Optional</span></span>
+        <span class="input-wrap">
+          <input id="token" class="mono" type="password" autocomplete="off" spellcheck="false" placeholder="Only if Kiln has a UI password">
+          <button class="icon-btn" id="reveal" type="button" aria-label="Show token" title="Show token">
+            <svg class="icon" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="2.75"/></svg>
+          </button>
+        </span>
+        <span class="field__hint">The value of <code>KILN_API_TOKEN</code> in Kiln's <code>.env</code>. Leave empty if Kiln has no <code>KILN_UI_PASSWORD</code>.</span>
+      </label>
+
+      <div>
+        <h2>Notifications</h2>
+        <p class="field__hint">Checked about once a minute, and every few seconds while a model loads.</p>
+      </div>
+      <label class="check"><input type="checkbox" data-notify="tune"><span><span>Tuning runs finish or fail</span></span></label>
+      <label class="check"><input type="checkbox" data-notify="ready"><span><span>A model you started from the extension is ready</span></span></label>
+      <label class="check"><input type="checkbox" data-notify="crash"><span><span>llama-server crashes or fails to load</span></span></label>
+      <label class="check"><input type="checkbox" data-notify="downloads"><span><span>Model downloads finish or fail</span></span></label>
+
+      <div class="row">
+        <button class="btn btn--primary btn--md" id="save" type="submit">Save and test</button>
+        <span class="text-caption subtle" id="saved"></span>
+      </div>
+      <div class="result" id="result" role="status" hidden></div>
+    </form>
+
+    <p class="field__hint">Open the quick actions with the toolbar button or <code>Alt+Shift+K</code>. Change the shortcut in
+      <code>about:addons</code> → gear menu → Manage Extension Shortcuts.</p>
+  </div>
+  <script type="module" src="options.js"></script>
+</body>
+</html>

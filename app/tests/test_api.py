@@ -1,6 +1,7 @@
 import contextlib
 import json
 import unittest
+import unittest.mock
 
 import httpx
 
@@ -132,6 +133,52 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(forced.status_code, 200)
         await self.wait(forced.json()["started"]["run_id"])
         self.assertEqual(len(manager.live()), 2)
+
+    async def test_replace_true_switches_in_one_call_like_the_extension_does(self):
+        a, b = await self.preset("alpha"), await self.preset("beta")
+        ra = (await self.start(a["id"])).json()["started"]
+        await self.wait(ra["run_id"])
+        rb = await self.start(b["id"], replace=True)  # stops alpha, then starts beta
+        self.assertEqual(rb.status_code, 200, rb.text)
+        await self.wait(rb.json()["started"]["run_id"])
+        self.assertEqual([i.name for i in manager.live()], ["beta"])
+        again = await self.start(b["id"], replace=True)  # the running preset is replaced, not refused
+        self.assertEqual(again.status_code, 200, again.text)
+        await self.wait(again.json()["started"]["run_id"])
+        self.assertNotEqual(again.json()["started"]["run_id"], rb.json()["started"]["run_id"])
+        self.assertEqual([i.name for i in manager.live()], ["beta"])
+        self.assertEqual((await self.start(b["id"], replace="sideways")).status_code, 400)
+
+    async def test_quick_snapshot_for_the_extension(self):
+        a, b = await self.preset("alpha"), await self.preset("beta", role="embedding")
+        await self.wait((await self.start(a["id"])).json()["started"]["run_id"])
+        await self.wait((await self.start(b["id"])).json()["started"]["run_id"])
+        db.set_settings({"autostart_preset_ids": [b["id"]]})
+        q = (await self.http.get("/api/quick")).json()
+        self.assertEqual((q["server"]["state"], q["server"]["model"]), ("ready", "alpha"))
+        self.assertEqual(sorted(i["name"] for i in q["instances"]), ["alpha", "beta"])
+        by_name = {p["name"]: p for p in q["presets"]}
+        self.assertTrue(by_name["alpha"]["active"] and by_name["beta"]["active"])
+        self.assertEqual((by_name["alpha"]["autostart"], by_name["beta"]["autostart"]), (False, True))
+        self.assertEqual(by_name["beta"]["role"], "embedding")
+
+    async def test_auth_token_and_cors_for_extensions(self):
+        from kiln import config
+        self.stack.enter_context(unittest.mock.patch.object(config, "UI_PASSWORD", "pw"))
+        self.stack.enter_context(unittest.mock.patch.object(config, "API_TOKEN", "tok"))
+        ext = {"Origin": "moz-extension://1a2b-3c"}
+        self.assertEqual((await self.http.get("/api/quick")).status_code, 401)
+        self.assertEqual((await self.http.get("/api/quick", headers={"Authorization": "Bearer tok"})).status_code, 200)
+        self.assertEqual((await self.http.get("/api/quick", headers={"Authorization": "Bearer nope"})).status_code, 401)
+        self.assertEqual((await self.http.get("/api/quick", auth=("kiln", "pw"))).status_code, 200)
+        self.assertEqual((await self.http.get("/healthz")).status_code, 200)
+        pre = await self.http.options("/api/quick", headers={**ext, "Access-Control-Request-Method": "GET"})
+        self.assertEqual((pre.status_code, pre.headers["access-control-allow-origin"]), (204, ext["Origin"]))
+        denied = await self.http.get("/api/quick", headers=ext)  # an extension, no credentials: 401 it can read
+        self.assertEqual((denied.status_code, denied.headers["access-control-allow-origin"]), (401, ext["Origin"]))
+        self.assertNotIn("www-authenticate", denied.headers)
+        site = await self.http.get("/api/quick", headers={"Origin": "https://evil.example", "Authorization": "Bearer tok"})
+        self.assertNotIn("access-control-allow-origin", site.headers)
 
     async def test_custom_flags_and_a_role_on_the_request(self):
         r = await self.http.post("/api/server/start", json={"model": model("raw"), "flags": [{"flag": "-c", "value": "1024"}], "role": "embedding"})

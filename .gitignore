@@ -15,3 +15,7 @@ __pycache__/
 .idea/
 *.swp
 .DS_Store
+
+# Browser extension builds (web-ext build / sign)
+extension/dist/
+extension/web-ext-artifacts/

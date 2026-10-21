@@ -25,20 +25,48 @@ app = FastAPI(title="Kiln", docs_url="/api/docs", redoc_url=None, openapi_url="/
 
 # ---------------------------------------------------------------- plumbing
 
+_cors_origin = re.compile(config.CORS_ORIGINS) if config.CORS_ORIGINS else None
+_CORS_HEADERS = {
+    "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+    "Access-Control-Allow-Headers": "Authorization, Content-Type",
+    "Access-Control-Max-Age": "600",
+    "Vary": "Origin",
+}
+
+
+def _authorized(request: Request) -> bool:
+    """Basic (UI user + password) or Bearer KILN_API_TOKEN. EventSource can't send headers, so
+    the event stream also takes the token as ?access_token=."""
+    h = request.headers.get("authorization", "")
+    scheme, _, cred = h.partition(" ")
+    scheme = scheme.lower()
+    if scheme == "basic":
+        try:
+            user, _, pw = base64.b64decode(cred).decode().partition(":")
+        except Exception:
+            return False
+        return secrets.compare_digest(user, config.UI_USER) and secrets.compare_digest(pw, config.UI_PASSWORD)
+    token = cred.strip() if scheme == "bearer" else (
+        request.query_params.get("access_token", "") if request.url.path == "/api/events" else "")
+    return bool(config.API_TOKEN and token) and secrets.compare_digest(token, config.API_TOKEN)
+
+
 @app.middleware("http")
-async def basic_auth(request: Request, call_next):
-    if config.UI_PASSWORD and request.url.path != "/healthz":
-        ok = False
-        h = request.headers.get("authorization", "")
-        if h.lower().startswith("basic "):
-            try:
-                user, _, pw = base64.b64decode(h[6:]).decode().partition(":")
-                ok = secrets.compare_digest(user, config.UI_USER) and secrets.compare_digest(pw, config.UI_PASSWORD)
-            except Exception:
-                ok = False
-        if not ok:
-            return Response(status_code=401, headers={"WWW-Authenticate": 'Basic realm="Kiln"'})
-    return await call_next(request)
+async def auth_and_cors(request: Request, call_next):
+    origin = request.headers.get("origin", "")
+    path = request.url.path
+    cors = bool(origin and _cors_origin and (path.startswith("/api/") or path == "/healthz") and _cors_origin.match(origin))
+    if cors and request.method == "OPTIONS":  # preflight carries no credentials; answer it before auth
+        return Response(status_code=204, headers={**_CORS_HEADERS, "Access-Control-Allow-Origin": origin})
+    if config.UI_PASSWORD and request.url.path != "/healthz" and not _authorized(request):
+        # No WWW-Authenticate for cross-origin callers: it would pop the browser's login dialog.
+        resp = Response(status_code=401, headers={} if cors else {"WWW-Authenticate": 'Basic realm="Kiln"'})
+    else:
+        resp = await call_next(request)
+    if cors:
+        resp.headers["Access-Control-Allow-Origin"] = origin
+        resp.headers["Vary"] = "Origin"
+    return resp
 
 
 @app.exception_handler(ValueError)
@@ -98,28 +126,39 @@ class StartBody(BaseModel):
     flags: list[dict] = Field(default_factory=list)
     env: dict[str, str] = Field(default_factory=dict)
     role: str | None = None
-    replace: list[int] | str | None = None  # run ids to stop first, or "auto": idle, unpinned models until it fits
+    # true: stop every running model first, so one call switches to this preset (what the browser extension
+    # sends); false or absent: start alongside; a list of run ids: stop those first; "auto": stop idle,
+    # unpinned models, least recently used first, until it fits.
+    replace: bool | list[int] | str | None = None
     force: bool = False  # start even if the memory estimate says it won't fit
 
 
 def _launch_args(body: StartBody) -> dict:
-    if body.replace not in (None, "auto") and not isinstance(body.replace, list):
-        raise ValueError('replace must be a list of run ids or "auto".')
+    replace = body.replace
+    if replace is True:
+        replace = [i.run_id for i in manager.live() if i.state != "stopping"]
+    elif replace is False:
+        replace = None
+    elif replace is not None and replace != "auto" and not isinstance(replace, list):
+        raise ValueError('replace must be true, a list of run ids, or "auto".')
     if body.preset_id is not None:
         p = get_preset(body.preset_id)
         if not p:
             raise LookupError("That preset no longer exists.")
         return {"model": body.model or p["model"], "rows": p["flags"], "env": p["env"], "preset": p,
-                "role": body.role or p["role"]}
-    return {"model": body.model or "", "rows": body.flags, "env": body.env, "preset": None, "role": body.role}
+                "role": body.role or p["role"], "replace": replace}
+    return {"model": body.model or "", "rows": body.flags, "env": body.env, "preset": None, "role": body.role,
+            "replace": replace}
 
 
 @app.post("/api/server/start")
 async def server_start(body: StartBody):
+    """Start a preset ({preset_id}) or an ad-hoc model, next to what is running if it fits. 409 with
+    code "no_fit" when it doesn't (the answer lists the models that could be stopped)."""
     a = _launch_args(body)
     try:
         inst = await manager.start(a["model"], a["rows"], a["env"], preset=a["preset"], role=a["role"],
-                                   force=body.force, replace=body.replace)
+                                   force=body.force, replace=a["replace"])
     except NoFit as e:
         return JSONResponse({"detail": str(e), "code": "no_fit", "plan": e.plan, "evict": e.evict}, status_code=409)
     return {**manager.status(), "started": inst.status()}
@@ -129,11 +168,39 @@ async def server_start(body: StartBody):
 async def server_plan(body: StartBody):
     """Whether a launch fits next to what is running, and what it would take to make room."""
     a = _launch_args(body)
-    return manager.plan(a["model"], a["rows"], a["preset"], a["role"], body.replace)
+    return manager.plan(a["model"], a["rows"], a["preset"], a["role"], a["replace"])
 
 
 class RunBody(BaseModel):
     run_id: int | None = None  # none = every server
+
+
+@app.get("/api/quick")
+async def quick():
+    """Everything a quick-action client (the browser extension) needs, in one small call."""
+    s = manager.status()
+    active = {i["preset"]["id"] for i in s["instances"] if i["preset"] and i["state"] in ("loading", "ready")}
+    autostart = set(db.get_settings().get("autostart_preset_ids") or [])
+    presets = []
+    for r in db.rows("SELECT id, name, description, model, role FROM presets"):
+        r["model_name"] = models.display_name(r["model"]) if r["model"] else ""
+        r["model_missing"] = not (r["model"] and os.path.exists(r["model"]))
+        r["last_used"] = db.scalar("SELECT MAX(started_at) FROM runs WHERE preset_id=?", (r["id"],))
+        r["active"] = r["id"] in active
+        r["autostart"] = r["id"] in autostart
+        presets.append(r)
+    presets.sort(key=lambda r: (-(r["last_used"] or 0), r["name"].lower()))
+    return {
+        "server": {k: s[k] for k in ("state", "model", "model_path", "preset", "uptime_s", "loading_s",
+                                      "error", "blocked", "n_ctx", "api_port")},
+        "instances": [{k: i[k] for k in ("run_id", "name", "role", "state", "preset", "model", "n_ctx", "error")}
+                      for i in s["instances"]],
+        "presets": presets,
+        "tune": tuner.status(),
+        "downloads": {"active": db.scalar("SELECT COUNT(*) FROM downloads WHERE status IN ('queued','downloading')")},
+        "gpu": gpu.sampler.live[-1] if gpu.sampler.live else None,
+        "server_time": time.time(),
+    }
 
 
 @app.post("/api/server/stop")
