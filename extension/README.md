@@ -5,6 +5,15 @@ presets, stop or restart without opening the control panel. A badge on the butto
 state at a glance, and notifications tell you when a tuning run finishes, a model is ready, the
 server crashes or a download ends.
 
+<table>
+  <tr>
+    <td><img src="../docs/screenshots/extension-popup.png" alt="The Kiln popup in the dark theme: the running model, Stop and Restart, and the preset list" width="300"></td>
+    <td><img src="../docs/screenshots/extension-popup-light.png" alt="The same popup in the light theme" width="300"></td>
+  </tr>
+</table>
+
+<sub>Demo instance with sample data.</sub>
+
 It's a Manifest V3 WebExtension with no build step and no dependencies. It talks to Kiln's
 control API ([../docs/API.md](../docs/API.md)), mostly `GET /api/quick` and
 `POST /api/server/start {preset_id, replace: true}`. It needs a Kiln build that has those.

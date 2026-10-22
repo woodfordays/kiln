@@ -171,7 +171,7 @@ function footer() {
   const bits = [];
   const g = snap.gpu;
   if (g && g.vram_total) bits.push(`VRAM ${fmtGiB(g.vram_used)} / ${fmtGiB(g.vram_total)} GiB`);
-  if (g && g.busy != null) bits.push(`${Math.round(g.busy * 100)}% busy`);
+  if (g && g.busy != null) bits.push(`${Math.round(g.busy)}% busy`);
   if (g && g.power_w != null) bits.push(`${Math.round(g.power_w)} W`);
   const dl = snap.downloads.active;
   if (!bits.length && !dl) return null;

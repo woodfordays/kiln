@@ -127,7 +127,7 @@ or call it once and then follow [live events](#live-events).
   ],
   "tune": { "running": false, "tune_id": 7, "stage": "", "trial": "" },
   "downloads": { "active": 0 },
-  "gpu": { "t": 1792031889.2, "busy": 0.97, "vram_used": 21474836480, "vram_total": 25753026560,
+  "gpu": { "t": 1792031889.2, "busy": 97.0, "vram_used": 21474836480, "vram_total": 25753026560,
            "power_w": 241.0, "temp_c": 71.0, "sclk_mhz": 2480.0, "gpus": 1 },
   "server_time": 1792031889.6
 }
@@ -178,7 +178,7 @@ is `ready` if any model is, else `loading`, `stopping`, `crashed` or `stopped`.
 **`downloads.active`**: queued plus downloading Hugging Face downloads.
 
 **`gpu`**: the latest 2-second GPU sample, `null` if no GPU telemetry is available. `busy` is
-0–1, VRAM is in bytes, and every field can be `null` when the driver doesn't report it.
+a percentage (0–100), VRAM is in bytes, and every field can be `null` when the driver doesn't report it.
 
 ### Run a preset: `POST /api/server/start`
 
