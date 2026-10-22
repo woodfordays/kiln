@@ -57,6 +57,29 @@ class EstimateTests(unittest.TestCase):
         self.assertEqual(kv("irregular", [False] * 3 + [True] * 5), 1566)    # 3 full layers
         self.assertEqual(kv("windows", [True] * 8), 48)                      # no full layers at all
 
+    def test_gemma4_pattern_array_counts_its_full_attention_layers(self):
+        """Gemma 4 E2B: 35 layers, four window layers then a full one, seven times over (true = window)."""
+        # 35 layers x 1 KV head of 192 at f16 = 13.1 KiB per token; 7 full layers, 28 that keep 1024 cells
+        def kv(name, pattern):
+            p = llm(ROOT / f"g4-{name}.gguf", arch="gemma4", layers=35, embd=1536, heads=8, kv_heads=1, ctx=131072, vocab=32000,
+                    **{"gemma4.attention.sliding_window": 512, "gemma4.attention.sliding_window_pattern": pattern})
+            return fit.estimate(p, rows(ctx=131072, ngl=99, fit="off", ub=512))["parts"]["kv"]
+
+        self.assertEqual(kv("flags", ([True] * 4 + [False]) * 7), 693)
+        self.assertEqual(kv("every5", 5), 693)
+
+    def test_a_pattern_that_is_not_one_flag_per_layer_keeps_the_full_context(self):
+        meta = {"block_count": 35, "sliding_window": 512}
+        for pattern in ({"array": 35}, [], [False] * 40, [True] * 34, "x", None):
+            with self.subTest(pattern=pattern):
+                self.assertEqual(fit._kv_tokens({**meta, "sliding_window_pattern": pattern}, {}, 131072, 1, 512), 131072)
+
+    def test_unexpected_header_value_types_never_raise(self):
+        for key, value in (("sliding_window", [512] * 35), ("sliding_window", {"array": 35}), ("block_count", {"array": 35})):
+            with self.subTest(key=key):
+                meta = {"block_count": 35, "sliding_window": 512, "sliding_window_pattern": [True] * 35, key: value}
+                self.assertEqual(fit._kv_tokens(meta, {}, 131072, 1, 512), 131072)
+
     def test_hybrid_models_cache_only_their_attention_layers(self):
         hyb = llm(ROOT / "hyb.gguf", arch="qwen35", layers=40, embd=2048, heads=16, kv_heads=2, ctx=65536,
                   **{"qwen35.full_attention_interval": 4, "qwen35.attention.key_length": 256, "qwen35.attention.value_length": 256})
