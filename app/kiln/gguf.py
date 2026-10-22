@@ -167,7 +167,7 @@ EMBEDDING_ARCHS = {"bert", "nomic-bert", "nomic-bert-moe", "jina-bert-v2", "jina
                    "neo-bert", "eurobert", "gemma-embedding"}
 PROTOCOL_V3_TEMPLATE = "joint-question-inline-readout-v1"
 # Keys whose values are lists but that the library needs element-wise.
-ARRAY_KEYS = (".attention.head_count_kv", ".attention.head_count")
+ARRAY_KEYS = (".attention.head_count_kv", ".attention.head_count", ".attention.sliding_window_pattern")
 
 
 def decision_info(meta: dict) -> dict | None:

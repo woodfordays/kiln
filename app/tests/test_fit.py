@@ -44,6 +44,19 @@ class EstimateTests(unittest.TestCase):
         full = fit.estimate(swa, r + [{"flag": "--swa-full"}])["parts"]["kv"]
         self.assertLess(with_swa, full * 0.30)
 
+    def test_sliding_window_flags_per_layer(self):
+        """Flint stores one flag per layer instead of 'every Nth layer is full attention'."""
+        # 8 layers x 8 KV heads of 128 at f16 = 32 KiB per token; a window layer keeps ceil((1024 + 512) / 256) * 256 cells
+        def kv(name, pattern):
+            p = llm(ROOT / f"swa-{name}.gguf", layers=8, embd=4096, heads=32, kv_heads=8, ctx=131072, vocab=32000,
+                    **{"llama.attention.sliding_window": 1024, "llama.attention.sliding_window_pattern": pattern})
+            return fit.estimate(p, rows(ctx=131072, ngl=99, fit="off", ub=512))["parts"]["kv"]
+
+        self.assertEqual(kv("every4", 4), 1060)                              # 2 full layers of 8
+        self.assertEqual(kv("flags", [False, True, True, True] * 2), 1060)   # the same layout, flag by flag
+        self.assertEqual(kv("irregular", [False] * 3 + [True] * 5), 1566)    # 3 full layers
+        self.assertEqual(kv("windows", [True] * 8), 48)                      # no full layers at all
+
     def test_hybrid_models_cache_only_their_attention_layers(self):
         hyb = llm(ROOT / "hyb.gguf", arch="qwen35", layers=40, embd=2048, heads=16, kv_heads=2, ctx=65536,
                   **{"qwen35.full_attention_interval": 4, "qwen35.attention.key_length": 256, "qwen35.attention.value_length": 256})

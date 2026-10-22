@@ -118,12 +118,18 @@ def estimate(model: str, rows: list[dict]) -> dict:
 
 def _kv_tokens(meta: dict, eff: dict, ctx: int, n_seq: int, ub: int) -> float:
     """Cache cells per full-attention layer, averaged over the layers: sliding-window layers only keep
-    their window (plus a micro-batch), so a model with 3 window layers in 4 needs a fraction of the cache."""
-    window, pattern = int(meta.get("sliding_window") or 0), int(meta.get("sliding_window_pattern") or 0)
+    their window (plus a micro-batch), so a model with 3 window layers in 4 needs a fraction of the cache.
+    The pattern is either one number (every Nth layer is full attention) or a flag per layer (true = window)."""
+    window, pattern = int(meta.get("sliding_window") or 0), meta.get("sliding_window_pattern")
     n_layers = int(meta.get("block_count") or 0)
-    if not window or pattern < 2 or not n_layers or eff.get("swa_full"):
+    if not window or not n_layers or eff.get("swa_full"):
         return ctx
-    full = math.ceil(n_layers / pattern)
+    if isinstance(pattern, list):
+        full = sum(1 for windowed in pattern if not windowed)
+    elif (every := _int(pattern, 0) or 0) >= 2:
+        full = math.ceil(n_layers / every)
+    else:
+        return ctx
     swa_cells = min(ctx, math.ceil((window * n_seq + ub) / 256) * 256)
     return (full * ctx + (n_layers - full) * swa_cells) / n_layers
 

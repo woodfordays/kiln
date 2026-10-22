@@ -18,6 +18,8 @@ def _value(v):
     if isinstance(v, str):
         return 8, _s(v)
     if isinstance(v, list):
+        if v and isinstance(v[0], bool):
+            return 9, struct.pack("<IQ", 7, len(v)) + b"".join(struct.pack("<?", x) for x in v)
         if v and isinstance(v[0], str):
             return 9, struct.pack("<IQ", 8, len(v)) + b"".join(_s(x) for x in v)
         return 9, struct.pack("<IQ", 5, len(v)) + b"".join(struct.pack("<i", x) for x in v)

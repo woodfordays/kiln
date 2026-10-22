@@ -19,6 +19,11 @@ class ReaderTests(unittest.TestCase):
         p = write_gguf(ROOT / "b.gguf", {"general.architecture": "g", "g.attention.head_count_kv": [0, 4, 0, 4]})
         self.assertEqual(gguf.read_metadata(p, arrays=gguf.ARRAY_KEYS)["g.attention.head_count_kv"], [0, 4, 0, 4])
 
+    def test_per_layer_sliding_window_flags_are_kept(self):
+        flags = [False, True, True, False]
+        p = write_gguf(ROOT / "swa.gguf", {"general.architecture": "g", "g.attention.sliding_window_pattern": flags})
+        self.assertEqual(gguf.read_metadata(p, arrays=gguf.ARRAY_KEYS)["g.attention.sliding_window_pattern"], flags)
+
     def test_q8_0_rows_match_within_quantization(self):
         rows = [[(i * 7 + j) % 13 / 10 - 0.6 for j in range(64)] for i in range(5)]
         p = write_gguf(ROOT / "q.gguf", {"general.architecture": "x"},
