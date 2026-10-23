@@ -98,6 +98,7 @@ class Tuner:
         self.cancelled = False
         self.stage = ""
         self.trial_label = ""
+        self.plan: list[dict] = []  # the stages of the run, for the progress display (see _plan)
         self.proc: asyncio.subprocess.Process | None = None
         self.log: deque = deque(maxlen=400)
         self.threads_used: int | None = None  # the thread count llama-server logged: its own choice unless -t was given
@@ -112,6 +113,17 @@ class Tuner:
 
     def status(self) -> dict:
         return {"running": self.running, "tune_id": self.tune_id, "stage": self.stage, "trial": self.trial_label}
+
+    def live(self) -> dict:
+        """The status plus the stage plan: what the Tuner page shows while a run is going."""
+        return {**self.status(), "plan": self.plan}
+
+    def _plan_max(self, step_id: str, n: int) -> None:
+        """A stage's size became known (or exact); tell the page."""
+        for step in self.plan:
+            if step["id"] == step_id:
+                step["max"] = n
+        self._publish()
 
     async def start(self, params: dict) -> int:
         if self.running:
@@ -163,6 +175,7 @@ class Tuner:
         })
         self.cancelled = False
         self._filler_ids = None
+        self.plan = _plan(params)
         manager.blocked = "Kiln is tuning flags. The server is unavailable until it finishes or you cancel it."
         if previous:
             await manager.stop()  # the tuner needs the whole GPU
@@ -268,6 +281,7 @@ class Tuner:
 
                 if p["mode"] == "quick":
                     # One flag at a time, each change kept only if it wins by more than NOISE.
+                    self._plan_max("fa", 2 if incumbent["cfg"]["ctv"] == "f16" else 0)
                     if incumbent["cfg"]["ctv"] == "f16":
                         for fa in ("off", "auto"):
                             t = await trial("Flash attention", f"-fa {fa}", {**incumbent["cfg"], "fa": fa})
@@ -291,23 +305,16 @@ class Tuner:
                     #    prunes the ones that need strictly more memory (same KV/FA, larger or equal
                     #    batches and draft length), which are recorded without being run.
                     too_big: list[dict] = []
-
-                    for kvt in kv_fit:
-                        base_c = kvt["cfg"]
-                        fa_opts = ["on", "off", "auto"] if base_c["ctv"] == "f16" else ["on"]
-                        for fa in fa_opts:
-                            for ub in UBATCHES:
-                                bs = sorted({max(2048, int(ub)), *( [int(ub), 4096] if p.get("vary_batch") else [] )})
-                                for bb in [b for b in bs if b >= int(ub)]:
-                                    for s in spec_opts:
-                                        c = {**base_c, "fa": fa, "ub": ub, "b": str(bb), **s}
-                                        label = _combo_label(c)
-                                        if any(_needs_more(c, f) for f in too_big):
-                                            skip("Grid", label, c, "not run: a smaller configuration already didn't fit")
-                                            continue
-                                        t = await trial("Grid", label, c)
-                                        if not t["ok"] and "fit" in (t.get("error") or ""):  # memory, not a crash
-                                            too_big.append(c)
+                    # Each fitting KV type already ran its first combination (-fa on, -ub 512, no speculation).
+                    self._plan_max("grid", sum(1 for _ in _grid(kv_fit, spec_opts, p.get("vary_batch"))) - len(kv_fit))
+                    for c in _grid(kv_fit, spec_opts, p.get("vary_batch")):
+                        label = _combo_label(c)
+                        if any(_needs_more(c, f) for f in too_big):
+                            skip("Grid", label, c, "not run: a smaller configuration already didn't fit")
+                            continue
+                        t = await trial("Grid", label, c)
+                        if not t["ok"] and "fit" in (t.get("error") or ""):  # memory, not a crash
+                            too_big.append(c)
 
                     # 3. Confirm the top three.
                     incumbent = await confirm()
@@ -327,6 +334,7 @@ class Tuner:
         finally:
             await self._kill()
             self.stage, self.trial_label = "", ""
+            self.plan = []
             manager.blocked = None
             await self._after(p, best)
             self._publish()
@@ -447,16 +455,19 @@ class Tuner:
         auto = (lead.get("threads_used") if not lead["cfg"].get("threads") else None) or _default_threads()
         logical = _cpu_count()
         known = set(p.get("base_threads") or [])
+        generation_steps = _thread_candidates(auto, logical, known)
+        batch_pool = {n for n in {auto, logical, *known} if 1 <= n <= logical}
+        self._plan_max("threads", len(generation_steps) + len(batch_pool))  # one fewer once -t is chosen
         best = lead
-        for n in _thread_candidates(auto, logical, known):
+        for n in generation_steps:
             c = {**lead["cfg"], "threads": str(n)}
             t = await trial("Threads", _combo_label(c), c)
             if t["ok"] and t["score"] > best["score"] * (1 + NOISE):
                 best = t
         generation = int(best["cfg"]["threads"] or auto)
-        for n in sorted({auto, logical, *known} - {generation}):
-            if not 1 <= n <= logical:
-                continue
+        batch_steps = sorted(batch_pool - {generation})
+        self._plan_max("threads", len(generation_steps) + len(batch_steps))
+        for n in batch_steps:
             c = {**best["cfg"], "threads_batch": str(n)}
             t = await trial("Threads", _combo_label(c), c)
             if t["ok"] and t["score"] > best["score"] * (1 + NOISE):
@@ -679,7 +690,7 @@ class Tuner:
             return
         row = get_tune(self.tune_id)
         if row:
-            row["live"] = self.status()
+            row["live"] = self.live()
             events.publish("tune", row)
 
 
@@ -726,6 +737,44 @@ def _complexity(c: dict) -> int:
     return ((c["fa"] != "on") + (c["ub"] != "512") + (c["b"] != "2048") + bool(c.get("spec"))
             + (c["ctk"] != "f16") + (c["ctv"] != "f16") + bool(c.get("ncmoe"))
             + (c.get("ngl") not in (None, "99", "auto")) + bool(c.get("threads")) + bool(c.get("threads_batch")))
+
+
+def _grid(kv_fit: list[dict], spec_opts: list[dict], vary_batch: bool):
+    """Every combination of the grid search in its fixed nested order: KV type, flash attention,
+    -ub, -b, speculative option."""
+    for kvt in kv_fit:
+        base_c = kvt["cfg"]
+        for fa in (["on", "off", "auto"] if base_c["ctv"] == "f16" else ["on"]):
+            for ub in UBATCHES:
+                bs = sorted({max(2048, int(ub)), *([int(ub), 4096] if vary_batch else [])})
+                for bb in [b for b in bs if b >= int(ub)]:
+                    for s in spec_opts:
+                        yield {**base_c, "fa": fa, "ub": ub, "b": str(bb), **s}
+
+
+def _plan(p: dict) -> list[dict]:
+    """The stages of a run in the order they happen, for the progress display on the Tuner page.
+
+    Each has an id, a label, `stages` (the stage names its trials carry) and `max`: the most trials it
+    will measure, or None while that isn't known. The run narrows some of them as it learns more (the
+    grid's size once the KV types are known), see Tuner._plan_max.
+    """
+    def step(step_id: str, label: str, stages: list[str], n: int | None = None) -> dict:
+        return {"id": step_id, "label": label, "stages": stages, "max": n}
+
+    counts: dict[str, int] = {}
+    for s in _spec_options(p):
+        name = SPEC_LABEL.get(s["spec"], s["spec"])
+        counts[name] = counts.get(name, 0) + 1
+    spec = [step("spec:" + name, f"Speculative: {name}", [f"Speculative ({name})"], n) for name, n in counts.items()]
+    confirm = step("confirm", "Confirm", ["Confirm"], 3)
+    if p["objective"] == "context":
+        return [step("spill", "Spill search", ["Fit", "Spill"]), step("threads", "CPU threads", ["Threads"]), *spec, confirm]
+    kv = step("kv", "KV cache", ["KV cache"])
+    if p["mode"] == "quick":  # the first fit already ran -ub 512, so one batch size less
+        return [kv, step("fa", "Flash attention", ["Flash attention"], 2),
+                step("batch", "Batch size", ["Batch size"], len(UBATCHES) - 1), *spec]
+    return [kv, step("grid", "Every combination", ["Grid"]), confirm]
 
 
 def _spec_options(p: dict) -> list[dict]:

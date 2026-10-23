@@ -2,6 +2,7 @@
 import { html, E, useState, useEffect, useMemo, api, useApp, useFetch, useEvent, useNow, fmtInt, fmtTps, fmtPct, fmtBytes, fmtWhen, fmtDuration, isNum, commandLine, modelLabel, liveOf } from '../lib.js';
 import { askDesktopPermission } from '../notify.js';
 import { DRAFT_LABEL, draftLengths } from '../features.js';
+import { stageStates, stageCount, stageFill, STAGE_WORD } from '../tuneplan.js';
 
 const CTX_OPTIONS = [4096, 8192, 16384, 32768, 65536, 131072, 196608, 262144];
 const ctxLabel = (n) => (n % 1024 === 0 ? `${n / 1024}K` : fmtInt(n));
@@ -201,9 +202,33 @@ function RunningCard({ tune, live }) {
     <div className="stack">
       <${E.Progress} label=${live.stage ? `${live.stage}: ${live.trial}` : 'Starting'} value=${Math.min(done, est)} max=${est}
         valueText=${`${done} measured`} />
+      <${StageTracker} plan=${live.plan} trials=${tune ? tune.trials || [] : []} stage=${live.stage} />
       <p className="text-caption muted">The server is unavailable while tuning. Each candidate starts its own llama-server on an internal port.</p>
     </div>
   <//>`;
+}
+
+/* Every stage of the run in order: finished ones checked, the one in progress with its count, the rest
+   waiting. Stages that turn out to have nothing to run are marked skipped. */
+function StageTracker({ plan, trials, stage }) {
+  const steps = stageStates(plan, trials, stage);
+  if (!steps.length) return null;
+  return html`<ol className="stages" aria-label="Tuning stages">
+    ${steps.map((s) => html`<li key=${s.id} className=${'stage is-' + s.state} aria-current=${s.state === 'running' ? 'step' : undefined}>
+      <span className="stage__mark" aria-hidden="true">
+        ${s.state === 'done' ? html`<${E.Icon} name="check-circle" size=${16} />`
+          : s.state === 'running' ? html`<${E.Spinner} size=${14} />`
+          : s.state === 'skipped' ? html`<${E.Icon} name="minus" size=${16} />`
+          : html`<span className="stage__dot"></span>`}
+      </span>
+      <span className="stage__body">
+        <span className="stage__label text-label">${s.label}</span>
+        <span className="stage__count text-caption">${stageCount(s)}</span>
+        <span className="stage__bar" aria-hidden="true"><span style=${{ width: `${stageFill(s) * 100}%` }}></span></span>
+      </span>
+      <span className="em-sr-only">${STAGE_WORD[s.state]}</span>
+    </li>`)}
+  </ol>`;
 }
 
 function TuneResult({ tune, live }) {
