@@ -362,6 +362,7 @@ All routes on the control port. "Body" lists the JSON fields. Optional ones show
 | POST | `/api/server/dismiss` | `run_id` | Status. Forgets a crashed model. |
 | GET | `/api/server/logs` | `?tail=1000&run_id=` | `{run_id, lines: [[ts, text, source]]}` for one model (default: the primary one) |
 | GET | `/api/roles` | | Roles (`chat`, `embedding`, `rerank`, `decision`), the flags each adds, help text |
+| POST | `/api/decide` | A `/v1/systemone` body | The decision model's answer, status and `X-Kiln-Model` header exactly as the API port gives them (errors are `{"error": {…}}`, not `{"detail"}`). The UI's call builder uses it: it goes through the API port's routing and swapping and is recorded with the client `kiln-ui`. |
 | GET | `/api/runs` | `?limit=50` | Run history: preset, model, argv, env, start/ready/stop times, exit code, error |
 | GET | `/api/runs/{id}/log` | | The run's full log as a text file |
 | GET | `/api/flags` | | `llama-server --help` parsed: version, devices, flag metadata |
@@ -401,7 +402,7 @@ with `enabled: false` stays in the preset but isn't passed to llama-server. Flag
 
 | Method | Path | Body / query | Returns |
 |---|---|---|---|
-| POST | `/api/tune` | `model`, `ctx`; `objective="decode"` (`decode`, `balanced`, `prefill`, `context`), `depth=8192`, `speculative=true`, `base_preset_id=null`, `headroom_mib=512`, `name=""`, `start_after=false`, `mode="grid"` (`grid`, `quick`), `kv_policy="precise"` (`precise`, `all`), `vary_batch=false` | `{id}`. `409` if a run is in progress. |
+| POST | `/api/tune` | `model`, `ctx`; `objective="decode"` (`decode`, `balanced`, `prefill`, `context`), `depth=8192`, `speculative=true`, `drafts=null` (paths of draft files to try; by default the nearest file of each kind next to the model, or none when `speculative` is `false`), `base_preset_id=null`, `headroom_mib=512`, `name=""`, `start_after=false`, `mode="grid"` (`grid`, `quick`), `kv_policy="precise"` (`precise`, `all`), `vary_batch=false` | `{id}`. `409` if a run is in progress. |
 | POST | `/api/tune/cancel` | | `{ok}` |
 | GET | `/api/tune` | `?limit=20` | `{live, tunes}`: recent runs with params, trials, best, status |
 | GET | `/api/tune/{id}` | | One run, plus `live` if it's the current one |

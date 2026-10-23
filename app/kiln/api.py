@@ -11,12 +11,13 @@ import re
 import secrets
 import time
 
+import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import config, db, events, fit, flags, gpu, hf, metrics, models, roles, stats
+from . import config, db, events, fit, flags, gpu, hf, metrics, models, proxy, roles, stats
 from .server import NoFit, get_preset, manager
 from .tuner import get_tune, tuner
 
@@ -239,6 +240,17 @@ async def server_logs(tail: int = 1000, run_id: int | None = None):
 @app.get("/api/roles")
 async def roles_list():
     return roles.ROLES
+
+
+@app.post("/api/decide")
+async def decide(request: Request):
+    """The call builder's Run button. The body goes through the API port's own handler, so it is routed,
+    swapped in and recorded like any client's, and the answer comes back exactly as a client would see it."""
+    transport = httpx.ASGITransport(app=proxy.app, client=("kiln-ui", 0))
+    async with httpx.AsyncClient(transport=transport, base_url="http://kiln", timeout=None) as c:
+        r = await c.post("/v1/systemone", content=await request.body(), headers={"content-type": "application/json"})
+    headers = {"X-Kiln-Model": r.headers["x-kiln-model"]} if "x-kiln-model" in r.headers else {}
+    return Response(r.content, status_code=r.status_code, media_type="application/json", headers=headers)
 
 
 @app.get("/api/runs")
@@ -559,6 +571,7 @@ class TuneBody(BaseModel):
     objective: str = "decode"
     depth: int = 8192
     speculative: bool = True
+    drafts: list[str] | None = None  # draft files to try; default: the nearest of each kind next to the model
     base_preset_id: int | None = None
     headroom_mib: int = 512
     name: str = ""

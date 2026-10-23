@@ -165,6 +165,14 @@ def _dequant(mm, o: int, n: int, kind: str) -> list[float]:
 
 EMBEDDING_ARCHS = {"bert", "nomic-bert", "nomic-bert-moe", "jina-bert-v2", "jina-bert-v3", "modern-bert",
                    "neo-bert", "eurobert", "gemma-embedding"}
+# Architectures with no attention KV cache for --kv-unified to arrange: llama.cpp gives the recurrent ones
+# a state buffer instead (llm_arch_is_recurrent), and the encoders, diffusion and codec models no memory
+# at all (the nullptr cases of llama_model::create_memory). Everything else, hybrids and sliding-window
+# models included, passes the flag on to its cache.
+NO_KV_CACHE_ARCHS = EMBEDDING_ARCHS | {
+    "mamba", "mamba2", "rwkv6", "rwkv6qwen2", "rwkv7", "arwkv7",
+    "gemma-embedding2", "wavtokenizer-dec", "dream", "llada", "llada-moe", "rnd1", "clef", "clip",
+}
 PROTOCOL_V3_TEMPLATE = "joint-question-inline-readout-v1"
 # Keys whose values are lists but that the library needs element-wise.
 ARRAY_KEYS = (".attention.head_count_kv", ".attention.head_count", ".attention.sliding_window_pattern")
@@ -244,6 +252,7 @@ def summarize(meta: dict, filename: str = "") -> dict:
         "causal": meta.get(f"{arch}.attention.causal"),
         "decision": decision_info(meta),
         "draft": None if arch == "clip" else draft_info(meta, arch, filename),
+        "kv_cache": bool(arch) and arch not in NO_KV_CACHE_ARCHS,
     }
     info["role_hint"] = role_hint(info, filename)
     return info

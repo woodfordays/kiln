@@ -20,3 +20,5 @@ class LibraryTests(unittest.TestCase):
         self.assertEqual([(x["name"], x["type"]) for x in big["drafts"]], [("dspark-Big", "draft-dspark")])
         self.assertTrue(by_name["dspark-Big"]["is_draft"])
         self.assertTrue(by_name["mmproj-Big-f16"]["is_projector"])
+        self.assertTrue(big["kv_cache"])  # the preset editor offers the unified-KV switch only where this holds
+        self.assertFalse(by_name["mmproj-Big-f16"]["kv_cache"])

@@ -1,12 +1,16 @@
-/* Per-model features that live in a preset's flags: the vision projector and speculative decoding
-   (MTP built into the model, or a draft file such as DSpark). Pure functions over flag rows
-   ({flag, value, enabled}); a row with enabled:false stays in the preset but is not passed to
-   llama-server, so a feature can be switched off and back on without losing its settings. */
+/* Per-model features that live in a preset's flags: the vision projector, speculative decoding
+   (MTP built into the model, or a draft file such as DSpark) and the unified KV cache. Pure functions
+   over flag rows ({flag, value, enabled}); a row with enabled:false stays in the preset but is not
+   passed to llama-server, so a feature can be switched off and back on without losing its settings. */
 
 const SPEC = ['--spec-type'];
 const DRAFT = ['-md', '--spec-draft-model', '--model-draft'];
 const NMAX = ['--spec-draft-n-max'];
 const MMPROJ = ['--mmproj', '-mm'];
+const KVU_ON = ['--kv-unified', '-kvu'];
+const KVU_OFF = ['--no-kv-unified', '-no-kvu'];
+const SLOTS = ['-np', '--parallel'];
+const AUTO_SLOTS = '4'; // what llama-server uses while -np is auto
 const DEFAULT_NMAX = new Set(['3', '7', '15']);
 
 export const DRAFT_LABEL = {
@@ -25,6 +29,46 @@ export function defaultNMax(type, draft) {
   return '3';
 }
 
+const named = (row, names) => names.includes((row.flag || '').trim());
+
+/* llama-server shares one KV pool between the slots when asked to, and always while -np is auto
+   (it ignores --no-kv-unified then). With a fixed -np the default is a separate cache per slot, -c
+   split evenly. slots is null for auto. The last flag wins, as on the command line. */
+function readKv(rows) {
+  const np = find(rows, SLOTS);
+  const slots = isOn(np) && Number(np.value) > 0 ? Number(np.value) : null;
+  let asked = false;
+  for (const r of rows) {
+    if (!isOn(r)) continue;
+    if (named(r, KVU_ON)) asked = true;
+    else if (named(r, KVU_OFF)) asked = false;
+  }
+  return { on: slots === null || asked, forced: slots === null, slots, present: rows.some((r) => named(r, KVU_ON) || named(r, KVU_OFF)) };
+}
+
+/* One sentence for the switch and the chip hint. */
+export function kvUnifiedNote(kv) {
+  if (kv.forced) return `All slots share one KV pool, which llama-server always does while -np is auto. Turning it off sets -np ${AUTO_SLOTS}.`;
+  if (kv.slots === 1) return kv.on
+    ? 'All slots share one KV pool (--kv-unified). With a single slot there is nothing to share, so it changes nothing.'
+    : 'Each slot has its own KV cache, llama-server\'s default with -np set. With a single slot it makes no difference.';
+  return kv.on
+    ? `The ${kv.slots} slots share one KV pool, so one long request can use most of -c (--kv-unified).`
+    : `-c is split evenly between the ${kv.slots} slots, and a slot can't borrow room from another.`;
+}
+
+/* The draft lengths worth measuring for a draft file (the tuner's ladder: see _draft_lengths in tuner.py). */
+export function draftLengths(d) {
+  const block = Number(d.block_size) || 0;
+  let steps;
+  if (d.type === 'draft-dflash') { const n = block || 15; steps = [Math.max(1, n >> 2), Math.max(1, n >> 1), n]; }
+  else if (d.type === 'draft-dspark') steps = [3, 5, 7, 10];
+  else if (d.type === 'draft-eagle3') steps = [2, 3, 4, 5];
+  else steps = [4, 8, 16];
+  if (block) steps = steps.map((n) => Math.min(n, block));
+  return [...new Set(steps)].sort((a, b) => a - b);
+}
+
 export function readFeatures(rows) {
   const mm = find(rows, MMPROJ);
   const spec = find(rows, SPEC);
@@ -32,6 +76,7 @@ export function readFeatures(rows) {
   const types = isOn(spec) ? String(spec.value || '').split(',').map((t) => t.trim()).filter(Boolean) : [];
   const type = types.find((t) => t.startsWith('draft-')) || '';
   return {
+    kv: readKv(rows),
     vision: { on: isOn(mm) && !!mm.value, path: mm ? mm.value || '' : '', present: !!mm },
     spec: {
       type,
@@ -97,9 +142,29 @@ export function setSpec(rows, mode, draft) {
   return out;
 }
 
+/* On adds --kv-unified and skips any --no-kv-unified. Off skips --kv-unified; while -np is auto that is
+   not enough (llama-server forces the pool on), so it also pins -np to the slot count auto would use,
+   keeping a number the preset had before. */
+export function setKvUnified(rows, on) {
+  const out = rows.map((r) => ({ ...r }));
+  const ask = out.filter((r) => named(r, KVU_ON));
+  if (on) {
+    out.filter((r) => named(r, KVU_OFF)).forEach((r) => { r.enabled = false; });
+    if (ask.length) ask.forEach(enable); else out.push({ flag: '--kv-unified', value: null });
+    return out;
+  }
+  ask.forEach((r) => { r.enabled = false; });
+  if (readKv(out).forced) {
+    const np = find(out, SLOTS);
+    if (np && Number(np.value) > 0) enable(np); else upsert(out, SLOTS, '-np', AUTO_SLOTS);
+  }
+  return out;
+}
+
 /* The switches to show for a preset: only what the model can do, or what the preset already uses.
-   model: a library entry ({projectors, drafts, nextn_layers}) or undefined.
-   opts.noVision: the role ignores images (a Perplexity decider scored by Kiln), so no switch. */
+   model: a library entry ({projectors, drafts, nextn_layers, kv_cache}) or undefined.
+   opts.noVision: the role ignores images (a Perplexity decider scored by Kiln), so no switch.
+   opts.noKvUnified: Kiln runs it on one slot itself, so no switch. */
 export function chipsFor(model, rows, opts = {}) {
   const f = readFeatures(rows);
   const chips = [];
@@ -114,6 +179,9 @@ export function chipsFor(model, rows, opts = {}) {
     const on = f.spec.mode === 'draft' && f.spec.type === d.type && (!f.spec.draftPath || f.spec.draftPath === d.path);
     chips.push({ id: 'draft:' + d.path, label: DRAFT_LABEL[d.type] || 'Draft', on, draft: d, hint: d.name });
   }
+  if (!opts.noKvUnified && ((model && model.kv_cache) || f.kv.present)) {
+    chips.push({ id: 'kvu', label: 'KV unified', on: f.kv.on, hint: kvUnifiedNote(f.kv).replace(/\.$/, '') });
+  }
   return chips;
 }
 
@@ -123,6 +191,7 @@ export function toggleChip(model, rows, chip) {
     const projectors = (model && model.projectors) || [];
     return setVision(rows, !chip.on, projectors[0]);
   }
+  if (chip.id === 'kvu') return setKvUnified(rows, !chip.on);
   if (chip.on) return setSpec(rows, 'off');
   if (chip.id === 'mtp') return setSpec(rows, 'mtp');
   return setSpec(rows, 'draft', chip.draft);

@@ -127,8 +127,8 @@ def scan() -> list[dict]:
                 "quant": quant_from_name(group[0]) or meta.get("file_type", ""),
                 "is_projector": bool(meta.get("is_projector")) or "mmproj" in group[0].lower(),
                 **{k: meta.get(k) for k in ("arch", "size_label", "context_length", "block_count",
-                                            "expert_count", "nextn_layers", "decision", "draft", "role_hint",
-                                            "error")},
+                                            "expert_count", "nextn_layers", "kv_cache", "decision", "draft",
+                                            "role_hint", "error")},
                 "title": meta.get("name") or "",
             }
             entry["is_draft"] = bool(entry.get("draft")) and not entry["is_projector"]

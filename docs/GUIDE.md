@@ -51,7 +51,7 @@ every client is counted on the dashboard.
 
 ![Kiln overview](screenshots/overview.png)
 
-- **The side navigation** has the six working pages and **Settings**. Pages are addressed by the part of
+- **The side navigation** has the seven working pages and **Settings**. Pages are addressed by the part of
   the URL after `#`, such as `#/server` or `#/tuner`, so you can bookmark them.
 - **The status block** at the bottom of the navigation shows whether a model is running. With several
   models running it lists each by API name, with a dot that is lit while that model is ready.
@@ -177,6 +177,7 @@ or delete it. Deleting a preset keeps its run history and request statistics.
 | Vision | Loads the model's vision projector (`--mmproj`), found next to the model. |
 | MTP | Turns on the multi-token-prediction head built into some models (`--spec-type draft-mtp`). |
 | DSpark, DFlash, EAGLE-3, Draft model | Uses a draft file found next to the model for speculative decoding. |
+| KV unified | Makes the slots (`-np`) share one KV pool (`--kv-unified`) instead of each getting an equal slice of `-c`. Offered for every model with an attention cache, which is all but recurrent (Mamba, RWKV) and encoder models. It only matters with more than one slot. |
 
 Switching a feature off doesn't delete its flags. They stay in the preset, greyed out and skipped, so switching it
 back on restores the draft length and the rest. If the preset's model is running, the toast that appears has a
@@ -196,7 +197,8 @@ drops `--host` and `--port`, because it manages those.
 - **API name** is what clients put in `model`. It defaults to the preset name.
 - **Keep loaded** pins the preset: it is never stopped to make room for another model, by a request or by
   **Start**, and never unloaded for being idle.
-- **Model features** has the Vision switch and a *Speculative decoding* choice (off, MTP, or each draft file).
+- **Model features** has the Vision switch, a *Speculative decoding* choice (off, MTP, or each draft file) and
+  the *Unified KV cache* switch.
 - **Flags.** The editor knows every flag the compiled `llama-server` reports in `--help`, so it always matches
   the binary: it autocompletes names, offers choices for flags that have them, and shows the description and the
   environment variable under each row. A flag the build doesn't know is marked, because llama-server will
@@ -252,10 +254,11 @@ you need.
 | Model, Target context | What to tune and the context it must hold. The tuner keeps the context fixed. |
 | Benchmark depth | Length of the deep prompt. Deeper is more realistic and slower. |
 | Keep other flags from | A preset whose sampling, template and environment flags carry over. Memory and speed flags are re-tuned. |
-| Optimize for | *Generation*, *Balanced*, *Prompt processing*, or *Context length*, which moves weights to system RAM until the whole context fits. |
+| Optimize for | *Generation*, *Balanced*, *Prompt processing*, or *Context length*, which moves weights to system RAM until the whole context fits, then tries CPU thread counts (`-t`, `-tb`) on the fastest spill. |
 | Search | *Every combination*, or *One flag at a time* (faster, can miss combinations that only work together). |
 | KV cache types | The most precise type that fits, or every type that fits. |
 | MTP | For models with an MTP head, also try self-speculative decoding with 1 to 5 draft tokens. |
+| Draft files | One switch for each kind of draft file next to the model (DSpark, DFlash, EAGLE-3, a plain draft model): also try it at a few draft lengths. A run with both an MTP head and a draft file measures both and keeps the faster. |
 | Preset name | Defaults to `<model> · <context> · tuned`. |
 | Start the winning preset when done | On: the winner starts when tuning ends. Off: the model that was running before comes back. |
 
@@ -273,6 +276,27 @@ second measurement of the top three, and the *Winner* is the simplest finalist u
 2%. **Past runs** keeps every run, including failed and cancelled ones.
 
 How the search works, in order, and how scores are computed, is in [TUNER.md](TUNER.md).
+
+## Decide
+
+A call builder for decision models (`/v1/systemone`). Write the **State** the model should classify, as text
+or JSON, and add questions:
+
+- **Choice** picks one of named options. Each option has a name (the key in the answer) and an optional
+  description the model reads.
+- **Yes / no** answers with the probability that the question is true. You can say what yes and no mean.
+- **Score** places the state on an ordered scale, lowest first, and answers with the expected level
+  (0 is the first) and a probability per level.
+
+**Run** (or Ctrl+Enter) sends the call to the decision model and shows each answer with a bar per option; the
+winner is highlighted and the headline gives its probability. The call goes through the API port like any
+client's, so it can load a decision preset that isn't running, and it shows up under Requests with the client
+`kiln-ui`. Fields the server would reject are marked before you can run, and errors from the model (too many
+options for the checkpoint, a request longer than the context) appear in the Answer card.
+
+**Code** shows the same call as curl, Python, JavaScript or the bare JSON body, addressed to this Kiln's API
+URL, ready to copy. **Start from…** loads a template (support triage, moderation, blank) and **Paste JSON** loads
+an existing request body into the builder. The draft is kept in your browser between visits.
 
 ## Requests
 

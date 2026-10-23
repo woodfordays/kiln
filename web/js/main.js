@@ -5,6 +5,7 @@ import { ServerPage } from './pages/server.js';
 import { PresetsPage } from './pages/presets.js';
 import { ModelsPage } from './pages/models.js';
 import { RequestsPage } from './pages/requests.js';
+import { DecidePage } from './pages/decide.js';
 import { SettingsPage } from './pages/settings.js';
 import { TunerPage } from './pages/tuner.js';
 import { useBackgroundNotifications } from './notify.js';
@@ -15,6 +16,7 @@ const PAGES = {
   presets: { label: 'Presets', icon: 'file', component: PresetsPage },
   models: { label: 'Models', icon: 'database', component: ModelsPage },
   tuner: { label: 'Tuner', icon: 'workflow', component: TunerPage },
+  decide: { label: 'Decide', icon: 'filter', component: DecidePage },
   requests: { label: 'Requests', icon: 'activity', component: RequestsPage },
   settings: { label: 'Settings', icon: 'sliders', component: SettingsPage },
 };
@@ -91,7 +93,7 @@ function App() {
   const activeDownloads = Object.keys(downloads).length;
 
   const sections = [
-    { items: ['overview', 'server', 'presets', 'tuner', 'models', 'requests'].map((id) => ({
+    { items: ['overview', 'server', 'presets', 'tuner', 'models', 'decide', 'requests'].map((id) => ({
       id, label: PAGES[id].label, icon: PAGES[id].icon, href: '#/' + id,
       count: id === 'models' && activeDownloads ? activeDownloads : id === 'tuner' && status && status.blocked ? 'Running' : undefined,
     })) },
