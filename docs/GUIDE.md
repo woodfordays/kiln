@@ -364,6 +364,11 @@ Set `KILN_UI_PASSWORD` in `.env` and restart. Add `KILN_API_TOKEN` for scripts a
 `--api-key` on presets you don't want strangers loading. The details are in
 [Access control](CONFIGURATION.md#access-control).
 
+### Watch Kiln in Grafana
+
+Point Prometheus at `http://<host>:8090/metrics` (with the API token if you set a password) and import
+`docs/grafana/kiln.json` into Grafana. See [Prometheus and Grafana](METRICS.md).
+
 ### Use it from your own scripts
 
 The control panel's own API is documented in [API.md](API.md): one call returns a status-and-presets snapshot,

@@ -13,7 +13,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from starlette.background import BackgroundTask
 
-from . import config, db, decider, events, gpu
+from . import config, db, decider, events, gpu, metrics
 from .route import resolve
 from .server import NoFit, get_preset, manager
 
@@ -132,6 +132,7 @@ def _may_load(request: Request, preset: dict) -> bool:
 
 def _insert(row: dict) -> None:
     row["id"] = db.insert("requests", row)
+    metrics.observe(row)
     events.publish("request", row)
 
 

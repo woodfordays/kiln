@@ -90,6 +90,14 @@ class H(BaseHTTPRequestHandler):
         if self.path.startswith("/props"):
             return self._send(200, {"default_generation_settings": {"n_ctx": CTX}, "total_slots": 1,
                                     "build_info": "fake-1", "modalities": {"vision": False}, "model_alias": ALIAS})
+        if self.path.startswith("/metrics"):
+            text = ("# HELP llamacpp:prompt_tokens_total Number of prompt tokens processed.\n"
+                    "# TYPE llamacpp:prompt_tokens_total counter\n"
+                    "llamacpp:prompt_tokens_total 5\n"
+                    "# HELP llamacpp:requests_processing Number of requests processing.\n"
+                    "# TYPE llamacpp:requests_processing gauge\n"
+                    "llamacpp:requests_processing 0\n")
+            return self._send(200, text.encode(), "text/plain; version=0.0.4")
         if self.path.startswith("/v1/models"):
             return self._send(200, {"object": "list", "data": [{"id": ALIAS, "object": "model", "created": 1, "owned_by": "llamacpp"}]})
         return self._send(404, {"error": {"message": "not found"}})

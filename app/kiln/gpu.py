@@ -64,6 +64,7 @@ class GpuSampler:
         self.live: deque = deque(maxlen=int(LIVE_SECONDS / config.GPU_SAMPLE_S) + 1)
         self._minute: list[dict] = []
         self._minute_ts = 0
+        self.energy_j = 0.0  # since start, integrated from power readings
         want = os.environ.get("KILN_GPU_TELEMETRY", "auto").lower()
         # Follow the image's backend first: a CUDA host can also show an AMD iGPU in /sys.
         order = ["nvidia", "amd"] if os.environ.get("KILN_BACKEND") == "cuda" else ["amd", "nvidia"]
@@ -149,6 +150,14 @@ class GpuSampler:
         vals = [s["power_w"] for s in self.live if t0 - config.GPU_SAMPLE_S <= s["t"] <= t1 + config.GPU_SAMPLE_S and s["power_w"] is not None]
         return sum(vals) / len(vals) if vals else None
 
+    def _add_energy(self, s: dict) -> None:
+        prev = self.live[-1] if self.live else None
+        if not prev or prev["power_w"] is None or s["power_w"] is None:
+            return
+        dt = s["t"] - prev["t"]
+        if 0 < dt <= 5 * config.GPU_SAMPLE_S:  # a stalled sampler leaves a gap rather than a guess
+            self.energy_j += (prev["power_w"] + s["power_w"]) / 2 * dt
+
     def _flush_minute(self) -> None:
         if not self._minute:
             return
@@ -169,6 +178,7 @@ class GpuSampler:
         while True:
             s = await asyncio.to_thread(self.sample)
             if s:
+                self._add_energy(s)
                 self.live.append(s)
                 minute = int(s["t"] // 60) * 60
                 if minute != self._minute_ts:

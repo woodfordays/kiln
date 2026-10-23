@@ -16,7 +16,7 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Res
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import config, db, events, fit, flags, gpu, hf, models, roles, stats
+from . import config, db, events, fit, flags, gpu, hf, metrics, models, roles, stats
 from .server import NoFit, get_preset, manager
 from .tuner import get_tune, tuner
 
@@ -110,6 +110,15 @@ async def status():
         "auth": bool(config.UI_PASSWORD),
         "server_time": time.time(),
     }
+
+
+@app.get("/metrics")
+async def prometheus_metrics():
+    """Prometheus exposition: Kiln's request counters, the GPU, the running models, and llama-server's own metrics."""
+    meta = flags.load()
+    info = {"llama_version": meta["version"] or "", "backend": os.environ.get("KILN_BACKEND") or _backend_from_devices(meta["devices"])}
+    text = await metrics.render(list(manager.instances.values()), info)
+    return PlainTextResponse(text, media_type="text/plain; version=0.0.4; charset=utf-8")
 
 
 def _backend_from_devices(devices: list[str]) -> str:

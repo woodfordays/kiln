@@ -352,6 +352,7 @@ All routes on the control port. "Body" lists the JSON fields. Optional ones show
 | Method | Path | Body / query | Returns |
 |---|---|---|---|
 | GET | `/healthz` | | `{ok, server}`. No auth. |
+| GET | `/metrics` | | Prometheus text format: request counters, the GPU, running models and llama-server's own metrics ([METRICS.md](METRICS.md)) |
 | GET | `/api/status` | | Fleet status (the primary model's fields plus `instances`, `vram`) and `llama` (version, binary, devices), `backend`, `gpu` (availability and last sample), `auth`, `server_time` |
 | GET | `/api/quick` | | [Quick snapshot](#get-apiquick) |
 | POST | `/api/server/start` | `preset_id` or `model`+`flags`+`env`; `role`, `replace` (`true`, run ids or `"auto"`), `force=false` | Status and `started` ([details](#run-a-preset-post-apiserverstart)) |
