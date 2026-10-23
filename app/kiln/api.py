@@ -17,7 +17,7 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Res
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import config, db, events, fit, flags, gpu, hf, models, proxy, roles, stats
+from . import config, db, events, fit, flags, gpu, hf, metrics, models, proxy, roles, stats
 from .server import NoFit, get_preset, manager
 from .tuner import get_tune, tuner
 
@@ -111,6 +111,15 @@ async def status():
         "auth": bool(config.UI_PASSWORD),
         "server_time": time.time(),
     }
+
+
+@app.get("/metrics")
+async def prometheus_metrics():
+    """Prometheus exposition: Kiln's request counters, the GPU, the running models, and llama-server's own metrics."""
+    meta = flags.load()
+    info = {"llama_version": meta["version"] or "", "backend": os.environ.get("KILN_BACKEND") or _backend_from_devices(meta["devices"])}
+    text = await metrics.render(list(manager.instances.values()), info)
+    return PlainTextResponse(text, media_type="text/plain; version=0.0.4; charset=utf-8")
 
 
 def _backend_from_devices(devices: list[str]) -> str:
@@ -562,6 +571,7 @@ class TuneBody(BaseModel):
     objective: str = "decode"
     depth: int = 8192
     speculative: bool = True
+    drafts: list[str] | None = None  # draft files to try; default: the nearest of each kind next to the model
     base_preset_id: int | None = None
     headroom_mib: int = 512
     name: str = ""
@@ -586,7 +596,7 @@ async def tune_cancel():
 async def tune_list(limit: int = 20):
     rows = db.rows("SELECT id FROM tunes ORDER BY id DESC LIMIT ?", (limit,))
     out = [get_tune(r["id"]) for r in rows]
-    return {"live": tuner.status(), "tunes": out}
+    return {"live": tuner.live(), "tunes": out}
 
 
 @app.get("/api/tune/{tid}")
@@ -594,7 +604,7 @@ async def tune_get(tid: int):
     t = get_tune(tid)
     if not t:
         raise LookupError("No such tuning run.")
-    t["live"] = tuner.status() if tuner.tune_id == tid else None
+    t["live"] = tuner.live() if tuner.tune_id == tid else None
     return t
 
 

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFeatures, setVision, setSpec, setKvUnified, kvUnifiedNote, chipsFor, toggleChip, defaultNMax } from '../js/features.js';
+import { readFeatures, setVision, setSpec, setKvUnified, kvUnifiedNote, chipsFor, toggleChip, defaultNMax, draftLengths } from '../js/features.js';
 
 const argv = (rows) => rows.filter((r) => r.enabled !== false).flatMap((r) => (r.value == null || r.value === '' ? [r.flag] : [r.flag, r.value]));
 const dspark = { path: '/m/dspark.gguf', type: 'draft-dspark', name: 'dspark', block_size: 15 };
@@ -170,4 +170,13 @@ test('the note says what the switch does for the slot count in use', () => {
   assert.match(kvUnifiedNote(kvOf([np('1'), { flag: '-kvu' }])), /single slot.*changes nothing/);
   assert.match(kvUnifiedNote(kvOf([np('3')])), /split evenly between the 3 slots/);
   assert.match(kvUnifiedNote(kvOf([np('3'), { flag: '-kvu' }])), /3 slots share one KV pool/);
+});
+
+test('the tuner measures draft files at lengths that suit the kind and the trained block size', () => {
+  assert.deepEqual(draftLengths({ type: 'draft-dspark', block_size: 15 }), [3, 5, 7, 10]);
+  assert.deepEqual(draftLengths({ type: 'draft-dspark', block_size: 7 }), [3, 5, 7]);
+  assert.deepEqual(draftLengths({ type: 'draft-dflash', block_size: 16 }), [4, 8, 16]);
+  assert.deepEqual(draftLengths({ type: 'draft-dflash' }), [3, 7, 15]);
+  assert.deepEqual(draftLengths({ type: 'draft-simple' }), [4, 8, 16]);
+  assert.deepEqual(draftLengths({ type: 'draft-eagle3' }), [2, 3, 4, 5]);
 });

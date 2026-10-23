@@ -16,7 +16,10 @@ Deterministic by construction:
   spill out of VRAM into system RAM to reach it: MoE expert weights first (--n-cpu-moe, which keeps
   attention and the KV cache on the GPU), whole layers (-ngl) for dense models. For each KV type
   and micro-batch it finds the smallest spill that fits by bisection (load-only probes; VRAM use
-  only grows with the spill shrinking), then benchmarks that configuration.
+  only grows with the spill shrinking), then benchmarks that configuration. Weights in system RAM
+  are read by the CPU, so that objective then also sweeps the thread counts (-t, then -tb).
+- Speculative decoding covers the MTP head and every draft file found next to the model (DSpark,
+  DFlash, EAGLE-3, a plain draft model), each at a few draft lengths.
 Measured speeds still vary by a percent or two between runs; the margin keeps the outcome stable.
 """
 from __future__ import annotations
@@ -39,16 +42,24 @@ from .server import manager
 PORT = config.TUNER_PORT
 URL = f"http://127.0.0.1:{PORT}"
 NOISE = 0.02
+POLL_S = 0.5  # how often a starting llama-server is asked if it is ready
 PROBE_MARGIN_MIB = 128  # a benchmark needs ~100 MiB more VRAM than loading did (measured on Vulkan and ROCm)
 SEED = 42
 
 KV_LADDER = [("f16", "f16"), ("q8_0", "q8_0"), ("q8_0", "q4_0"), ("q4_0", "q4_0")]
 UBATCHES = ["256", "512", "1024", "2048"]
 MTP_NMAX = ["1", "2", "3", "4", "5"]
+SPEC_LABEL = {"draft-mtp": "MTP", "draft-dspark": "DSpark", "draft-dflash": "DFlash", "draft-eagle3": "EAGLE-3",
+              "draft-simple": "Draft model"}
+NO_SPEC = {"spec": None, "draft": None, "nmax": None}
 TUNED_FLAGS = {"-ngl", "--gpu-layers", "--n-gpu-layers", "-c", "--ctx-size", "-np", "--parallel",
                "-fa", "--flash-attn", "-ctk", "--cache-type-k", "-ctv", "--cache-type-v",
                "-ub", "--ubatch-size", "-b", "--batch-size", "--spec-type", "--spec-draft-n-max",
+               "-md", "--spec-draft-model", "--model-draft",
                "-fit", "--fit", "-ncmoe", "--n-cpu-moe", "-cmoe", "--cpu-moe"}
+# Tuned only by the context objective, where weights in system RAM make the CPU part of the benchmark.
+THREAD_FLAGS = {"-t", "--threads", "-tb", "--threads-batch"}
+THREADS_RE = re.compile(r"threadpool init, n_threads = (\d+)")
 
 SHORT_PROMPTS = [
     "Write a Python function that parses an ISO 8601 date string without using any libraries, with comments.",
@@ -87,8 +98,10 @@ class Tuner:
         self.cancelled = False
         self.stage = ""
         self.trial_label = ""
+        self.plan: list[dict] = []  # the stages of the run, for the progress display (see _plan)
         self.proc: asyncio.subprocess.Process | None = None
         self.log: deque = deque(maxlen=400)
+        self.threads_used: int | None = None  # the thread count llama-server logged: its own choice unless -t was given
         self._filler_ids: list[int] | None = None
         self._task_ids: list[int] | None = None
 
@@ -100,6 +113,17 @@ class Tuner:
 
     def status(self) -> dict:
         return {"running": self.running, "tune_id": self.tune_id, "stage": self.stage, "trial": self.trial_label}
+
+    def live(self) -> dict:
+        """The status plus the stage plan: what the Tuner page shows while a run is going."""
+        return {**self.status(), "plan": self.plan}
+
+    def _plan_max(self, step_id: str, n: int) -> None:
+        """A stage's size became known (or exact); tell the page."""
+        for step in self.plan:
+            if step["id"] == step_id:
+                step["max"] = n
+        self._publish()
 
     async def start(self, params: dict) -> int:
         if self.running:
@@ -122,6 +146,7 @@ class Tuner:
         params["kv_policy"] = params.get("kv_policy") or "precise"
         meta = next((m for m in models.scan() if m["path"] == model), {})
         params["has_mtp"] = bool(meta.get("nextn_layers"))
+        params["drafts"] = _chosen_drafts(meta, params.get("drafts"), params.get("speculative", True))
         params["n_layers"] = int(meta.get("block_count") or 0)
         params["is_moe"] = bool(meta.get("expert_count"))
         params["model_size"] = int(meta.get("size") or 0)
@@ -134,7 +159,11 @@ class Tuner:
                 base = {"flags": json.loads(row["flags"]), "env": json.loads(row["env"])}
         else:
             base["flags"] = [{"flag": "--jinja", "value": None}]
-        base["flags"] = [f for f in base["flags"] if f["flag"] not in TUNED_FLAGS]
+        tuned = TUNED_FLAGS | THREAD_FLAGS if params["objective"] == "context" else TUNED_FLAGS
+        # What the preset already used is measured too, so a hand-picked thread count gets a fair test.
+        params["base_threads"] = [n for n in (_flag_int(base["flags"], ("-t", "--threads")),
+                                              _flag_int(base["flags"], ("-tb", "--threads-batch"))) if n]
+        base["flags"] = [f for f in base["flags"] if f["flag"] not in tuned]
         params["base"] = base
 
         previous = manager.snapshot() or None  # everything running now comes back afterwards
@@ -146,6 +175,7 @@ class Tuner:
         })
         self.cancelled = False
         self._filler_ids = None
+        self.plan = _plan(params)
         manager.blocked = "Kiln is tuning flags. The server is unavailable until it finishes or you cancel it."
         if previous:
             await manager.stop()  # the tuner needs the whole GPU
@@ -167,7 +197,7 @@ class Tuner:
         best = None
         try:
             cfg = {"ngl": "99", "ctx": str(p["ctx"]), "np": "1", "fa": "on", "ctk": "f16", "ctv": "f16",
-                   "ub": "512", "b": "2048", "spec": None, "nmax": None, "ncmoe": None}
+                   "ub": "512", "b": "2048", **NO_SPEC, "ncmoe": None, "threads": None, "threads_batch": None}
 
             async def trial(stage: str, label: str, c: dict, fresh: bool = False) -> dict:
                 key = json.dumps(c, sort_keys=True)
@@ -247,10 +277,11 @@ class Tuner:
                                        f"{p['headroom_mib']} MiB to spare. Lower the target context.")
                 incumbent = kv_fit[0]
                 incumbent["chosen"] = True
-                spec_opts = [None] + (MTP_NMAX if p["has_mtp"] and p.get("speculative", True) else [])
+                spec_opts = [NO_SPEC, *_spec_options(p)]
 
                 if p["mode"] == "quick":
                     # One flag at a time, each change kept only if it wins by more than NOISE.
+                    self._plan_max("fa", 2 if incumbent["cfg"]["ctv"] == "f16" else 0)
                     if incumbent["cfg"]["ctv"] == "f16":
                         for fa in ("off", "auto"):
                             t = await trial("Flash attention", f"-fa {fa}", {**incumbent["cfg"], "fa": fa})
@@ -263,9 +294,9 @@ class Tuner:
                         if better(t, incumbent):
                             incumbent = t
                             t["chosen"] = True
-                    for n in spec_opts[1:]:
-                        c = {**incumbent["cfg"], "spec": "draft-mtp", "nmax": n}
-                        t = await trial("Speculative (MTP)", f"--spec-type draft-mtp --spec-draft-n-max {n}", c)
+                    for s in spec_opts[1:]:
+                        c = {**incumbent["cfg"], **s}
+                        t = await trial(f"Speculative ({SPEC_LABEL.get(s['spec'], s['spec'])})", _spec_flags(s), c)
                         if better(t, incumbent):
                             incumbent = t
                             t["chosen"] = True
@@ -274,29 +305,16 @@ class Tuner:
                     #    prunes the ones that need strictly more memory (same KV/FA, larger or equal
                     #    batches and draft length), which are recorded without being run.
                     too_big: list[dict] = []
-
-                    def needs_more(c: dict, f: dict) -> bool:
-                        return (c["ngl"] == f["ngl"] and c["ctk"] == f["ctk"] and c["ctv"] == f["ctv"] and c["fa"] == f["fa"]
-                                and int(c["ub"]) >= int(f["ub"]) and int(c["b"]) >= int(f["b"])
-                                and int(c["nmax"] or 0) >= int(f["nmax"] or 0))
-
-                    for kvt in kv_fit:
-                        base_c = kvt["cfg"]
-                        fa_opts = ["on", "off", "auto"] if base_c["ctv"] == "f16" else ["on"]
-                        for fa in fa_opts:
-                            for ub in UBATCHES:
-                                bs = sorted({max(2048, int(ub)), *( [int(ub), 4096] if p.get("vary_batch") else [] )})
-                                for bb in [b for b in bs if b >= int(ub)]:
-                                    for n in spec_opts:
-                                        c = {**base_c, "fa": fa, "ub": ub, "b": str(bb),
-                                             "spec": "draft-mtp" if n else None, "nmax": n}
-                                        label = _combo_label(c)
-                                        if any(needs_more(c, f) for f in too_big):
-                                            skip("Grid", label, c, "not run: a smaller configuration already didn't fit")
-                                            continue
-                                        t = await trial("Grid", label, c)
-                                        if not t["ok"] and "fit" in (t.get("error") or ""):  # memory, not a crash
-                                            too_big.append(c)
+                    # Each fitting KV type already ran its first combination (-fa on, -ub 512, no speculation).
+                    self._plan_max("grid", sum(1 for _ in _grid(kv_fit, spec_opts, p.get("vary_batch"))) - len(kv_fit))
+                    for c in _grid(kv_fit, spec_opts, p.get("vary_batch")):
+                        label = _combo_label(c)
+                        if any(_needs_more(c, f) for f in too_big):
+                            skip("Grid", label, c, "not run: a smaller configuration already didn't fit")
+                            continue
+                        t = await trial("Grid", label, c)
+                        if not t["ok"] and "fit" in (t.get("error") or ""):  # memory, not a crash
+                            too_big.append(c)
 
                     # 3. Confirm the top three.
                     incumbent = await confirm()
@@ -316,6 +334,7 @@ class Tuner:
         finally:
             await self._kill()
             self.stage, self.trial_label = "", ""
+            self.plan = []
             manager.blocked = None
             await self._after(p, best)
             self._publish()
@@ -403,13 +422,57 @@ class Tuner:
             raise RuntimeError(f"{p['ctx']:,} tokens of context doesn't fit with {p['headroom_mib']} MiB of VRAM "
                                f"to spare even with {unit} in system RAM{ram}. Lower the target context.")
 
-        # Speculative decoding on the fastest spill so far; the MTP head needs a little VRAM.
-        if p["has_mtp"] and p.get("speculative", True):
-            lead = max(measured, key=lambda t: (t["score"], -t["n"]))
-            for nmax in MTP_NMAX:
-                c = {**lead["cfg"], "spec": "draft-mtp", "nmax": nmax}
-                await trial("Speculative (MTP)", _combo_label(c), c)
+        lead = await self._thread_search(p, max(measured, key=lambda t: (t["score"], -t["n"])), trial)
+
+        # Speculative decoding on the fastest configuration so far. The MTP head and a draft file need
+        # a little VRAM, so one that doesn't load steps the spill up, as a benchmark does; a length that
+        # worked keeps its step for the longer ones.
+        steps = (0, 1, max(2, max_n // 16))
+        start_at: dict[tuple, int] = {}
+        for s in _spec_options(p):
+            c = {**lead["cfg"], **s}
+            key = (s["spec"], s["draft"])
+            for i in range(start_at.get(key, 0), len(steps)):
+                n = _spill_of(c, p, moe) + steps[i]
+                if n > max_n:
+                    break
+                c2 = _spilled(c, n, p, moe) if steps[i] else c
+                t = await trial(f"Speculative ({SPEC_LABEL.get(s['spec'], s['spec'])})", _combo_label(c2), c2)
+                if t["ok"]:
+                    start_at[key] = i
+                if t["ok"] or "VRAM" not in (t.get("error") or ""):
+                    break
         return await confirm()
+
+    async def _thread_search(self, p: dict, lead: dict, trial) -> dict:
+        """CPU threads on the fastest spill; returns the fastest configuration found.
+
+        Weights in system RAM are read by the CPU, so the thread count shows up in the benchmark.
+        llama.cpp's default (-t -1) is the baseline. Fewer threads can be as fast when memory bandwidth
+        is the limit, and the logical CPUs can help prompt processing. -t is swept first (-tb follows
+        it unless set), then -tb on the best -t. A change is kept only if it wins by more than NOISE.
+        """
+        auto = (lead.get("threads_used") if not lead["cfg"].get("threads") else None) or _default_threads()
+        logical = _cpu_count()
+        known = set(p.get("base_threads") or [])
+        generation_steps = _thread_candidates(auto, logical, known)
+        batch_pool = {n for n in {auto, logical, *known} if 1 <= n <= logical}
+        self._plan_max("threads", len(generation_steps) + len(batch_pool))  # one fewer once -t is chosen
+        best = lead
+        for n in generation_steps:
+            c = {**lead["cfg"], "threads": str(n)}
+            t = await trial("Threads", _combo_label(c), c)
+            if t["ok"] and t["score"] > best["score"] * (1 + NOISE):
+                best = t
+        generation = int(best["cfg"]["threads"] or auto)
+        batch_steps = sorted(batch_pool - {generation})
+        self._plan_max("threads", len(generation_steps) + len(batch_steps))
+        for n in batch_steps:
+            c = {**best["cfg"], "threads_batch": str(n)}
+            t = await trial("Threads", _combo_label(c), c)
+            if t["ok"] and t["score"] > best["score"] * (1 + NOISE):
+                best = t
+        return best
 
     # ------------------------------------------------------------ one candidate
 
@@ -463,6 +526,7 @@ class Tuner:
                 "draft": _draft_rate(short + deeps),
                 "power_w": gpu.sampler.mean_power(t0, t1),
                 "vram_free_mib": vram_free,
+                "threads_used": self.threads_used,
             })
             if vram_free is not None and vram_free < p["headroom_mib"]:
                 out["error"] = f"fits, but only {vram_free:.0f} MiB of VRAM left (needs {p['headroom_mib']})"
@@ -531,6 +595,7 @@ class Tuner:
 
     async def _launch(self, argv: list[str], env: dict) -> None:
         self.log.clear()
+        self.threads_used = None
         self.proc = await asyncio.create_subprocess_exec(
             *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
             stdin=asyncio.subprocess.DEVNULL, env={**os.environ, **env}, start_new_session=True, limit=1 << 20)
@@ -550,7 +615,7 @@ class Tuner:
                     pass
                 if time.time() > deadline:
                     raise RuntimeError("did not finish loading within 15 minutes")
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(POLL_S)
 
     async def _read(self) -> None:
         proc = self.proc
@@ -561,7 +626,10 @@ class Tuner:
                 continue
             if not raw:
                 break
-            self.log.append(raw.decode("utf-8", "replace").rstrip())
+            line = raw.decode("utf-8", "replace").rstrip()
+            self.log.append(line)
+            if self.threads_used is None and (m := THREADS_RE.search(line)):
+                self.threads_used = int(m.group(1))
 
     def _last_error(self) -> str:
         lines = list(self.log)
@@ -607,6 +675,9 @@ class Tuner:
             desc += f"; expert weights of {best['cfg']['ncmoe']} of {p['n_layers']} layers in system RAM"
         elif best["cfg"].get("ngl") not in (None, "99", "auto"):
             desc += f"; {best['cfg']['ngl']} of {p['n_layers'] + 1} layers on the GPU"
+        if best["cfg"].get("threads") or best["cfg"].get("threads_batch"):
+            desc += "; " + " ".join(f"{flag} {best['cfg'][key]}" for flag, key in (("-t", "threads"), ("-tb", "threads_batch"))
+                                    if best["cfg"].get(key))
         if baseline is not best and baseline.get("score"):
             desc += f"; {(best['score'] / baseline['score'] - 1) * 100:+.0f}% over the first fit"
         now = time.time()
@@ -619,7 +690,7 @@ class Tuner:
             return
         row = get_tune(self.tune_id)
         if row:
-            row["live"] = self.status()
+            row["live"] = self.live()
             events.publish("tune", row)
 
 
@@ -632,7 +703,14 @@ def _tuned_args(c: dict) -> list[str]:
     args = [*gpu, "-c", c["ctx"], "-np", c["np"], "-fa", c["fa"], "-ctk", c["ctk"], "-ctv", c["ctv"],
             "-ub", c["ub"], "-b", c["b"]]
     if c.get("spec"):
-        args += ["--spec-type", c["spec"], "--spec-draft-n-max", c["nmax"]]
+        args += ["--spec-type", c["spec"]]
+        if c.get("draft"):
+            args += ["-md", c["draft"]]
+        args += ["--spec-draft-n-max", c["nmax"]]
+    if c.get("threads"):
+        args += ["-t", c["threads"]]
+    if c.get("threads_batch"):
+        args += ["-tb", c["threads_batch"]]
     return args
 
 
@@ -647,7 +725,10 @@ def _combo_label(c: dict) -> str:
         parts.insert(0, f"--n-cpu-moe {c['ncmoe']}")
     elif c.get("ngl") not in (None, "99", "auto"):
         parts.insert(0, f"-ngl {c['ngl']}")
-    parts.append(f"MTP {c['nmax']}" if c.get("spec") else "no spec")
+    threads = " ".join(f"{flag} {c[key]}" for flag, key in (("-t", "threads"), ("-tb", "threads_batch")) if c.get(key))
+    if threads:
+        parts.append(threads)
+    parts.append(f"{SPEC_LABEL.get(c['spec'], c['spec'])} {c['nmax']}" if c.get("spec") else "no spec")
     return " · ".join(parts)
 
 
@@ -655,12 +736,154 @@ def _complexity(c: dict) -> int:
     """How far a configuration is from llama.cpp's defaults; fewer changes win ties."""
     return ((c["fa"] != "on") + (c["ub"] != "512") + (c["b"] != "2048") + bool(c.get("spec"))
             + (c["ctk"] != "f16") + (c["ctv"] != "f16") + bool(c.get("ncmoe"))
-            + (c.get("ngl") not in (None, "99", "auto")))
+            + (c.get("ngl") not in (None, "99", "auto")) + bool(c.get("threads")) + bool(c.get("threads_batch")))
+
+
+def _grid(kv_fit: list[dict], spec_opts: list[dict], vary_batch: bool):
+    """Every combination of the grid search in its fixed nested order: KV type, flash attention,
+    -ub, -b, speculative option."""
+    for kvt in kv_fit:
+        base_c = kvt["cfg"]
+        for fa in (["on", "off", "auto"] if base_c["ctv"] == "f16" else ["on"]):
+            for ub in UBATCHES:
+                bs = sorted({max(2048, int(ub)), *([int(ub), 4096] if vary_batch else [])})
+                for bb in [b for b in bs if b >= int(ub)]:
+                    for s in spec_opts:
+                        yield {**base_c, "fa": fa, "ub": ub, "b": str(bb), **s}
+
+
+def _plan(p: dict) -> list[dict]:
+    """The stages of a run in the order they happen, for the progress display on the Tuner page.
+
+    Each has an id, a label, `stages` (the stage names its trials carry) and `max`: the most trials it
+    will measure, or None while that isn't known. The run narrows some of them as it learns more (the
+    grid's size once the KV types are known), see Tuner._plan_max.
+    """
+    def step(step_id: str, label: str, stages: list[str], n: int | None = None) -> dict:
+        return {"id": step_id, "label": label, "stages": stages, "max": n}
+
+    counts: dict[str, int] = {}
+    for s in _spec_options(p):
+        name = SPEC_LABEL.get(s["spec"], s["spec"])
+        counts[name] = counts.get(name, 0) + 1
+    spec = [step("spec:" + name, f"Speculative: {name}", [f"Speculative ({name})"], n) for name, n in counts.items()]
+    confirm = step("confirm", "Confirm", ["Confirm"], 3)
+    if p["objective"] == "context":
+        return [step("spill", "Spill search", ["Fit", "Spill"]), step("threads", "CPU threads", ["Threads"]), *spec, confirm]
+    kv = step("kv", "KV cache", ["KV cache"])
+    if p["mode"] == "quick":  # the first fit already ran -ub 512, so one batch size less
+        return [kv, step("fa", "Flash attention", ["Flash attention"], 2),
+                step("batch", "Batch size", ["Batch size"], len(UBATCHES) - 1), *spec]
+    return [kv, step("grid", "Every combination", ["Grid"]), confirm]
+
+
+def _spec_options(p: dict) -> list[dict]:
+    """The speculative-decoding candidates for this run: the MTP head and each chosen draft file,
+    each at every draft length worth measuring."""
+    opts = []
+    if p["has_mtp"] and p.get("speculative", True):
+        opts += [{"spec": "draft-mtp", "draft": None, "nmax": n} for n in MTP_NMAX]
+    for d in p.get("drafts") or []:
+        opts += [{"spec": d["type"], "draft": d["path"], "nmax": n} for n in _draft_lengths(d)]
+    return opts
+
+
+def _spec_flags(s: dict) -> str:
+    return f"--spec-type {s['spec']}" + (f" -md {os.path.basename(s['draft'])}" if s.get("draft") else "") + \
+        f" --spec-draft-n-max {s['nmax']}"
+
+
+def _draft_lengths(d: dict) -> list[str]:
+    """Draft lengths to try for a draft file. DSpark and DFlash clamp --spec-draft-n-max to the block
+    size the draft was trained with, so nothing longer is worth a run."""
+    block = int(d.get("block_size") or 0)
+    if d["type"] == "draft-dflash":  # drafts a whole block; quarter and half of it are the shorter options
+        n = block or 15
+        steps = {max(1, n // 4), max(1, n // 2), n}
+    elif d["type"] == "draft-dspark":  # the llama.cpp examples use 7
+        steps = {3, 5, 7, 10}
+    elif d["type"] == "draft-eagle3":
+        steps = {2, 3, 4, 5}
+    else:  # a plain draft model is much cheaper per token than the target, so longer runs can pay
+        steps = {4, 8, 16}
+    if block:
+        steps = {min(n, block) for n in steps}
+    return [str(n) for n in sorted(steps)]
+
+
+def _chosen_drafts(meta: dict, wanted: list[str] | None, speculative: bool) -> list[dict]:
+    """The draft files to measure. By default the nearest file of each kind found next to the model
+    (none when speculative decoding is switched off); an explicit list names files from the library."""
+    found = meta.get("drafts") or []
+    if wanted is None:
+        picked: dict[str, dict] = {}
+        for d in found if speculative else []:
+            picked.setdefault(d["type"], d)  # the library lists the best name match first
+        chosen = list(picked.values())
+    else:
+        by_path = {d["path"]: d for d in found}
+        missing = [w for w in wanted if w not in by_path]
+        if missing:
+            raise ValueError(f"{missing[0]} is not a draft file next to this model.")
+        chosen = [by_path[w] for w in wanted]
+    return [{k: d.get(k) for k in ("path", "name", "type", "block_size", "size")} for d in chosen]
+
+
+def _flag_int(rows: list[dict], names: tuple[str, ...]) -> int | None:
+    for r in rows:
+        if (r.get("flag") or "").strip() in names and r.get("enabled") is not False:
+            try:
+                return int(r.get("value"))
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def _needs_more(c: dict, f: dict) -> bool:
+    """Does c need at least the memory of f, a configuration that didn't fit? Same layers, KV types and
+    flash attention, batches no smaller, and either f has no speculative decoding or c uses the same
+    one at no shorter a length (the MTP head and each draft file take different amounts)."""
+    if not (c["ngl"] == f["ngl"] and c["ctk"] == f["ctk"] and c["ctv"] == f["ctv"] and c["fa"] == f["fa"]
+            and int(c["ub"]) >= int(f["ub"]) and int(c["b"]) >= int(f["b"])):
+        return False
+    return not f.get("spec") or (c.get("spec") == f["spec"] and c.get("draft") == f.get("draft")
+                                 and int(c["nmax"] or 0) >= int(f["nmax"] or 0))
+
+
+def _cpu_count() -> int:
+    """Logical CPUs this process may run on (a container can be limited to fewer than the host has)."""
+    try:
+        return len(os.sched_getaffinity(0))
+    except AttributeError:
+        return os.cpu_count() or 1
+
+
+def _default_threads() -> int:
+    """llama.cpp's default thread count when its log doesn't say: one per physical core, which is half
+    the logical CPUs on a machine with SMT."""
+    n = _cpu_count()
+    return max(1, n // 2) if n >= 4 else n
+
+
+def _thread_candidates(auto: int, logical: int, known: set[int]) -> list[int]:
+    """Generation thread counts to measure against llama.cpp's default (auto): half and three quarters
+    of it, since decode over weights in system RAM is bound by memory bandwidth and more threads only
+    contend for it; every logical CPU; and whatever the preset already used."""
+    steps = {max(1, auto // 2), max(1, round(auto * 3 / 4)), logical, *known}
+    steps.discard(auto)
+    return sorted(n for n in steps if 1 <= n <= logical)
 
 
 def _spill_max(p: dict, moe: bool) -> int:
     """Largest spill: every layer's experts (MoE), or every layer plus the output layer (dense)."""
     return p["n_layers"] if moe else p["n_layers"] + 1
+
+
+def _spill_of(c: dict, p: dict, moe: bool) -> int:
+    """How many layers' weights this configuration keeps in system RAM (the inverse of _spilled)."""
+    if moe:
+        return int(c.get("ncmoe") or 0)
+    return _spill_max(p, moe) - int(c["ngl"]) if c.get("ngl") not in (None, "99", "auto") else 0
 
 
 def _spilled(c: dict, n: int, p: dict, moe: bool) -> dict:

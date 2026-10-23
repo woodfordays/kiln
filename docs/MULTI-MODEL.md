@@ -130,7 +130,7 @@ Verified on the real `llama-server` (b11699, on CPU, with a short greedy generat
 The counting prompt is easy to draft, so the acceptance rates flatter; use the tuner or your own
 traffic for real numbers. `--spec-type draft-dspark` and its siblings need a recent llama.cpp
 (`LLAMA_CPP_REF=b11699` was used here). DFlash and DSpark clamp `--spec-draft-n-max` to the draft's
-block size. The tuner still tries only MTP.
+block size. The [tuner](TUNER.md) measures draft files as well as the MTP head, and keeps whichever is faster.
 
 ## Unified KV cache
 

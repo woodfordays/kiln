@@ -31,6 +31,8 @@ requests, speeds, tuning results and GPU readings are sample data made up to sho
 - **Dashboard**: decode and prefill speed, time to first token, decode speed by context depth, tokens per period,
   draft acceptance for speculative decoding, GPU VRAM, power and load, per-model breakdowns and all-time totals.
   Every request is stored in SQLite under `./data`, so the history survives restarts, rebuilds and upgrades.
+- **Prometheus metrics** at `/metrics`, with llama-server's own metrics labelled by model, and a Grafana
+  dashboard ([docs/METRICS.md](docs/METRICS.md)).
 - **Control API** for scripts and browser extensions: one call for a status-and-presets snapshot, one call to
   switch presets, token auth, and live events. Reference: [docs/API.md](docs/API.md).
 - **Browser extension** for Zen and Firefox ([extension/](extension/README.md)): see what's running, switch
@@ -176,6 +178,7 @@ The full table, access control, GPU notes and upgrading llama.cpp are in
 | [The tuner](docs/TUNER.md) | What it tries, in what order, and how it scores. |
 | [Configuration](docs/CONFIGURATION.md) | `.env`, access control, GPU notes, upgrading llama.cpp, and where data lives. |
 | [Troubleshooting](docs/TROUBLESHOOTING.md) | Messages you may see, and what to do about them. |
+| [Prometheus and Grafana](docs/METRICS.md) | Scraping `/metrics`, every metric, the Grafana dashboard and example queries. |
 | [Control API](docs/API.md) | Every route of the control panel's API, auth, CORS and live events. |
 | [Design and architecture](docs/DESIGN.md) | How Kiln is built. |
 | [Browser extension](extension/README.md) | Installing and using the Zen/Firefox extension. |

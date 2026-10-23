@@ -37,7 +37,7 @@ Kiln has two ports, and they are protected differently.
 
 | Port | What it serves | Protection |
 |---|---|---|
-| Control panel, `8090` | The web UI and the control API under `/api` | Off by default. Set `KILN_UI_PASSWORD` and every path except `/healthz` asks for HTTP Basic credentials: user `kiln`, that password. |
+| Control panel, `8090` | The web UI, the control API under `/api`, and Prometheus `/metrics` | Off by default. Set `KILN_UI_PASSWORD` and every path except `/healthz` asks for HTTP Basic credentials: user `kiln`, that password. |
 | API, `8080` | The OpenAI-compatible endpoints | None of its own. A preset with `--api-key …` makes llama-server enforce a key for that model. |
 
 - **Scripts and the browser extension** can use a token instead of the UI password. Set
