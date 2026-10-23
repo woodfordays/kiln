@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFeatures, setVision, setSpec, chipsFor, toggleChip, defaultNMax } from '../js/features.js';
+import { readFeatures, setVision, setSpec, setKvUnified, kvUnifiedNote, chipsFor, toggleChip, defaultNMax } from '../js/features.js';
 
 const argv = (rows) => rows.filter((r) => r.enabled !== false).flatMap((r) => (r.value == null || r.value === '' ? [r.flag] : [r.flag, r.value]));
 const dspark = { path: '/m/dspark.gguf', type: 'draft-dspark', name: 'dspark', block_size: 15 };
@@ -93,4 +93,81 @@ test('draft length defaults', () => {
 
 test('the vision chip can be hidden for roles that ignore images', () => {
   assert.deepEqual(chipsFor(model, base, { noVision: true }).map((c) => c.label), ['MTP', 'DSpark']);
+});
+
+const np = (n, extra = {}) => ({ flag: '-np', value: n, ...extra });
+const kvOf = (rows) => readFeatures(rows).kv;
+
+test('unified KV follows -np: always on while auto, off by default once -np is set', () => {
+  assert.deepEqual(kvOf(base), { on: true, forced: true, slots: null, present: false });
+  assert.equal(kvOf([...base, np('-1')]).on, true);
+  assert.deepEqual(kvOf([...base, np('1')]), { on: false, forced: false, slots: 1, present: false });
+  assert.equal(kvOf([...base, np('1', { enabled: false })]).forced, true); // a skipped -np is no -np
+  // --no-kv-unified is ignored by llama-server while -np is auto; the last flag wins otherwise
+  assert.equal(kvOf([{ flag: '--no-kv-unified' }]).on, true);
+  assert.equal(kvOf([np('2'), { flag: '--kv-unified' }]).on, true);
+  assert.equal(kvOf([np('2'), { flag: '-kvu' }, { flag: '--no-kv-unified' }]).on, false);
+  assert.equal(kvOf([np('2'), { flag: '--no-kv-unified' }, { flag: '-kvu' }]).on, true);
+  assert.equal(kvOf([np('2'), { flag: '--kv-unified', enabled: false }]).on, false);
+  assert.equal(kvOf([np('2'), { flag: '--kv-unified', enabled: false }]).present, true);
+});
+
+test('turning unified KV on adds the flag, off skips it and keeps it for later', () => {
+  const fixed = [...base, np('1')];
+  const on = setKvUnified(fixed, true);
+  assert.deepEqual(argv(on), ['-ngl', '99', '-c', '8192', '-np', '1', '--kv-unified']);
+  assert.equal(kvOf(on).on, true);
+  const off = setKvUnified(on, false);
+  assert.deepEqual(argv(off), ['-ngl', '99', '-c', '8192', '-np', '1']);
+  assert.equal(off.at(-1).flag, '--kv-unified'); // remembered, greyed out
+  assert.deepEqual(argv(setKvUnified(off, true)).slice(-1), ['--kv-unified']);
+  assert.equal(setKvUnified(off, true).length, off.length); // re-enabled, not added twice
+});
+
+test('turning unified KV on replaces a --no-kv-unified, whichever spelling', () => {
+  const rows = [np('2'), { flag: '-no-kvu' }];
+  assert.deepEqual(argv(setKvUnified(rows, true)), ['-np', '2', '--kv-unified']);
+  assert.equal(kvOf(setKvUnified(rows, true)).on, true);
+  const both = [np('2'), { flag: '-kvu' }, { flag: '--no-kv-unified' }];
+  assert.equal(kvOf(setKvUnified(both, true)).on, true);
+  assert.equal(kvOf(setKvUnified([np('2'), { flag: '-kvu' }, { flag: '-kvu' }], false)).on, false);
+});
+
+test('turning unified KV off while -np is auto pins the slot count auto would use', () => {
+  const off = setKvUnified(base, false);
+  assert.deepEqual(argv(off), ['-ngl', '99', '-c', '8192', '-np', '4']);
+  assert.equal(kvOf(off).on, false);
+  // an -np the preset had before comes back instead
+  const was = [...base, np('2', { enabled: false })];
+  assert.deepEqual(argv(setKvUnified(was, false)).slice(-2), ['-np', '2']);
+  // and -np -1 is replaced
+  assert.deepEqual(argv(setKvUnified([np('-1')], false)), ['-np', '4']);
+  // with --kv-unified given and -np auto it is the same story
+  const forced = setKvUnified([{ flag: '--kv-unified' }], false);
+  assert.deepEqual(argv(forced), ['-np', '4']);
+  assert.equal(kvOf(forced).on, false);
+});
+
+test('the unified KV chip appears only for models with an attention cache, or presets already using the flag', () => {
+  const dense = { kv_cache: true };
+  const rows = [...base, np('1')];
+  const chips = chipsFor(dense, rows);
+  assert.deepEqual(chips.map((c) => [c.label, c.on]), [['KV unified', false]]);
+  const flipped = toggleChip(dense, rows, chips[0]);
+  assert.deepEqual(chipsFor(dense, flipped).map((c) => c.on), [true]);
+  assert.deepEqual(chipsFor(dense, toggleChip(dense, flipped, chipsFor(dense, flipped)[0])).map((c) => c.on), [false]);
+  assert.deepEqual(chipsFor({ kv_cache: false }, rows), []);
+  assert.deepEqual(chipsFor({}, rows), []);
+  assert.deepEqual(chipsFor({ kv_cache: false }, [{ flag: '--kv-unified' }]).map((c) => c.label), ['KV unified']);
+  assert.deepEqual(chipsFor(dense, rows, { noKvUnified: true }), []);
+  // sits after the other switches
+  assert.deepEqual(chipsFor({ ...model, kv_cache: true }, rows).map((c) => c.label), ['Vision', 'MTP', 'DSpark', 'KV unified']);
+});
+
+test('the note says what the switch does for the slot count in use', () => {
+  assert.match(kvUnifiedNote(kvOf(base)), /always does while -np is auto.*-np 4/);
+  assert.match(kvUnifiedNote(kvOf([np('1')])), /single slot.*no difference/);
+  assert.match(kvUnifiedNote(kvOf([np('1'), { flag: '-kvu' }])), /single slot.*changes nothing/);
+  assert.match(kvUnifiedNote(kvOf([np('3')])), /split evenly between the 3 slots/);
+  assert.match(kvUnifiedNote(kvOf([np('3'), { flag: '-kvu' }])), /3 slots share one KV pool/);
 });

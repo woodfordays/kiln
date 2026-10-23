@@ -64,7 +64,7 @@ right now, and offers to stop an idle model to make room:
 ### Presets
 
 A preset is a model, its flags and environment, a role (chat, embeddings, reranker or decision) and an API name.
-Feature chips switch vision, MTP and draft files on and off without losing their settings.
+Feature chips switch vision, MTP, draft files and the unified KV cache on and off without losing their settings.
 
 ![Presets page](docs/screenshots/presets.png)
 

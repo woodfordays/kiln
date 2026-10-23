@@ -62,3 +62,11 @@ class ReaderTests(unittest.TestCase):
         rr = write_gguf(ROOT / "bge-reranker-v2.gguf", {"general.architecture": "bert", "general.name": "bge-reranker-v2"})
         self.assertEqual(gguf.summarize(gguf.read_metadata(rr), "bge-reranker-v2.gguf")["role_hint"], "rerank")
         self.assertEqual(gguf.summarize(gguf.read_metadata(llm(ROOT / "chat.gguf")))["role_hint"], "chat")
+
+    def test_only_models_with_an_attention_cache_can_share_it(self):
+        def kv(arch):
+            return gguf.summarize(gguf.read_metadata(write_gguf(ROOT / f"kv-{arch}.gguf", {"general.architecture": arch})))["kv_cache"]
+        for arch in ("llama", "qwen3", "qwen35", "qwen35moe", "gemma3", "nemotron_h"):  # plain, hybrid and sliding-window
+            self.assertTrue(kv(arch), arch)
+        for arch in ("mamba2", "rwkv7", "bert", "gemma-embedding2", "llada", "clip"):  # state buffer, encoder, diffusion, projector
+            self.assertFalse(kv(arch), arch)

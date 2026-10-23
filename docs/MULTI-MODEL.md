@@ -128,3 +128,32 @@ The counting prompt is easy to draft, so the acceptance rates flatter; use the t
 traffic for real numbers. `--spec-type draft-dspark` and its siblings need a recent llama.cpp
 (`LLAMA_CPP_REF=b11699` was used here). DFlash and DSpark clamp `--spec-draft-n-max` to the draft's
 block size. The tuner still tries only MTP.
+
+## Unified KV cache
+
+`llama-server` can keep one KV pool that all its slots (`-np`) share, or give each slot its own slice of
+`-c`. The **KV unified** chip, and the *Unified KV cache* switch in the editor, set that with
+`--kv-unified`. It is offered for every model with an attention KV cache, which includes hybrid and
+sliding-window models such as Qwen3.8. Recurrent models (Mamba, RWKV) and encoder or diffusion models have
+nothing to share, so they get no switch.
+
+What `llama-server` does with the flags (build 11803, on CPU, `-c 1024`, read from its own `kv_unified` log line):
+
+| Flags | Slots | Context per slot | Unified |
+|---|---|---|---|
+| none (`-np` auto) | 4 | 1024 | yes |
+| `--no-kv-unified` (`-np` auto) | 4 | 1024 | yes, the flag is ignored |
+| `-np 2` | 2 | 512 | no |
+| `-np 2 --kv-unified` | 2 | 1024 | yes |
+| `-np 4 --no-kv-unified` | 4 | 256 | no |
+| `-np 1 --kv-unified` | 1 | 1024 | yes, but one slot has nothing to share |
+
+So a preset with `-np` set is not unified unless you ask, which is why a log line showing `kv_unified = 'false'`
+is normal for a tuned preset (the tuner sets `-np 1`). With one slot the switch changes nothing in
+`llama-server`. It starts to matter with `-np 2` or more: unified lets one long request use most of `-c`
+while the others are idle, at the cost of the slots competing for the same room. The KV memory is `-c` either
+way, so the memory estimate doesn't change.
+
+Turning it off while `-np` is auto also sets `-np 4`, the slot count auto would have used, because
+`llama-server` forces the shared pool on whenever `-np` is auto. Turning it off again keeps the `-np` and
+`--kv-unified` rows in the preset, skipped, like the other features.
