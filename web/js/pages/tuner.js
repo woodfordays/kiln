@@ -1,6 +1,7 @@
 /* Tuner: measure flag candidates in a fixed order, keep the winner, save it as a preset. */
 import { html, E, useState, useEffect, useMemo, api, useApp, useFetch, useEvent, useNow, fmtInt, fmtTps, fmtPct, fmtBytes, fmtWhen, fmtDuration, isNum, commandLine, modelLabel, liveOf } from '../lib.js';
 import { askDesktopPermission } from '../notify.js';
+import { DRAFT_LABEL, draftLengths } from '../features.js';
 
 const CTX_OPTIONS = [4096, 8192, 16384, 32768, 65536, 131072, 196608, 262144];
 const ctxLabel = (n) => (n % 1024 === 0 ? `${n / 1024}K` : fmtInt(n));
@@ -14,7 +15,7 @@ const OBJ_HINT = {
   decode: 'Score: decode speed, geometric mean of a short prompt and the deep prompt.',
   balanced: 'Score: decode^0.7 × prefill^0.3, for long-document and agent work.',
   prefill: 'Score: prompt processing speed at the benchmark depth.',
-  context: 'Keeps the whole target context and its KV cache on the GPU, and moves model weights to system RAM until it fits: expert weights first on MoE models, whole layers on dense ones. Finds the smallest spill for each batch size, then scores like Balanced.',
+  context: 'Keeps the whole target context and its KV cache on the GPU, and moves model weights to system RAM until it fits: expert weights first on MoE models, whole layers on dense ones. Finds the smallest spill for each batch size, then tries CPU thread counts (-t, -tb) on the fastest, since the CPU reads the spilled weights. Scores like Balanced.',
 };
 
 /* What a configuration keeps in system RAM, for tables and the winner card. */
@@ -24,11 +25,17 @@ function spillText(cfg, params) {
   return 'Nothing';
 }
 
+/* The nearest draft file of each kind next to the model: what the tuner tries by default. */
+const draftsOf = (m) => {
+  const seen = new Set();
+  return ((m && m.drafts) || []).filter((d) => !seen.has(d.type) && seen.add(d.type));
+};
+
 function estimate(prm, hasMtp) {
-  const spec = hasMtp && prm.speculative ? 5 : 0;
+  const spec = (hasMtp && prm.speculative ? 5 : 0) + (prm.drafts || []).reduce((n, d) => n + draftLengths(d).length, 0);
   if (prm.objective === 'context') {
     const kv = prm.kv_policy === 'all' ? 4 : 1;
-    return kv * (4 + 8 + 3 * 3) + spec + 3; // a benchmark and a few load-only probes per batch size
+    return kv * (4 + 8 + 3 * 3) + 5 + spec + 3; // a benchmark and a few load-only probes per batch size, then thread counts
   }
   if (prm.mode === 'quick') return 4 + 2 + 4 + spec;
   const kv = prm.kv_policy === 'all' ? 2 : 1; // typical: one or two KV types fit at a long context
@@ -78,11 +85,13 @@ function TuneForm({ status, onStarted }) {
   const [objective, setObjective] = useState('decode');
   const [depth, setDepth] = useState('8192');
   const [speculative, setSpeculative] = useState(true);
+  const [skipped, setSkipped] = useState([]); // draft files switched off
   const [base, setBase] = useState('');
   const [name, setName] = useState('');
   const [startAfter, setStartAfter] = useState(true);
   const [busy, setBusy] = useState(false);
   useEffect(() => { if (!model && lib.length) setModel(lib[0].path); }, [models.data]);
+  useEffect(() => { setSkipped([]); }, [model]);
   const m = lib.find((x) => x.path === model);
   const maxCtx = m && m.context_length ? m.context_length : 262144;
   const ctxOpts = CTX_OPTIONS.filter((n) => n <= maxCtx).map((n) => ({ value: String(n), label: ctxLabel(n) + (n === maxCtx ? ' (trained maximum)' : '') }));
@@ -97,7 +106,9 @@ function TuneForm({ status, onStarted }) {
     setObjective(o);
     if (o === 'context' && ctxOpts.length) setCtx(ctxOpts[ctxOpts.length - 1].value);
   };
-  const candidates = estimate({ objective, mode, kv_policy: kvPolicy, vary_batch: varyBatch, speculative }, m && m.nextn_layers);
+  const draftFiles = draftsOf(m);
+  const tryDrafts = draftFiles.filter((d) => !skipped.includes(d.path));
+  const candidates = estimate({ objective, mode, kv_policy: kvPolicy, vary_batch: varyBatch, speculative, drafts: tryDrafts }, m && m.nextn_layers);
   const running = liveOf(status).length > 0;
 
   const start = async () => {
@@ -105,7 +116,7 @@ function TuneForm({ status, onStarted }) {
     setBusy(true);
     try {
       const r = await api.post('/api/tune', {
-        model, ctx: Number(ctx), objective, depth: Number(depth), speculative,
+        model, ctx: Number(ctx), objective, depth: Number(depth), speculative, drafts: tryDrafts.map((d) => d.path),
         base_preset_id: base ? Number(base) : null, name, start_after: startAfter,
         mode, kv_policy: kvPolicy, vary_batch: varyBatch,
       });
@@ -120,7 +131,7 @@ function TuneForm({ status, onStarted }) {
         <${E.Select} label="Model" value=${model} onChange=${(e) => setModel(e.target.value)}
           options=${lib.map((x) => ({ value: x.path, label: `${x.name} · ${fmtBytes(x.size)}` }))}
           placeholder=${lib.length ? undefined : 'No models in the library'}
-          hint=${m ? [m.arch, m.size_label, m.nextn_layers ? 'has an MTP head' : null].filter(Boolean).join(' · ') : undefined} />
+          hint=${m ? [m.arch, m.size_label, m.nextn_layers ? 'has an MTP head' : null, draftFiles.length ? 'draft files: ' + draftFiles.map((d) => DRAFT_LABEL[d.type] || 'draft').join(', ') : null].filter(Boolean).join(' · ') : undefined} />
         <${E.Select} label="Target context" value=${ctx} onChange=${(e) => setCtx(e.target.value)} options=${ctxOpts}
           hint=${isContext ? 'The tuner keeps this fixed and moves as little of the model to system RAM as it takes to fit.' : 'The tuner keeps this fixed and finds the fastest way to run it.'} />
         <${E.Select} label="Benchmark depth" value=${depth} onChange=${(e) => setDepth(e.target.value)} options=${depthOpts}
@@ -139,7 +150,7 @@ function TuneForm({ status, onStarted }) {
         ${isContext ? html`<div>
           <p className="field-label text-label">Search</p>
           <p className="text-body">Smallest spill per batch size</p>
-          <p className="field-hint text-caption">${m && m.expert_count ? `MoE model: moves expert weights of the first N layers (--n-cpu-moe), so attention and the KV cache stay on the GPU.` : 'Dense model: moves whole layers (-ngl). The KV cache of those layers moves with them.'} Each N is found by bisection with load-only probes.</p>
+          <p className="field-hint text-caption">${m && m.expert_count ? `MoE model: moves expert weights of the first N layers (--n-cpu-moe), so attention and the KV cache stay on the GPU.` : 'Dense model: moves whole layers (-ngl). The KV cache of those layers moves with them.'} Each N is found by bisection with load-only probes. The CPU reads the spilled weights, so the fastest spill is then measured at a few thread counts (-t, -tb).</p>
         </div>` : html`<div>
           <p className="field-label text-label">Search</p>
           <${E.SegmentedControl} label="Search" value=${mode} onChange=${setMode}
@@ -156,6 +167,9 @@ function TuneForm({ status, onStarted }) {
         description="Tries -b equal to -ub, 2048 and 4096 for every -ub. Nearly triples the run." />`}
       ${m && m.nextn_layers ? html`<${E.Switch} label="Try self-speculative decoding (MTP)" checked=${speculative} onChange=${(e) => setSpeculative(e.target.checked)}
         description="Tests --spec-type draft-mtp with 1 to 5 draft tokens. Acceptance is measured with greedy decoding, which can run higher than with sampling." />` : null}
+      ${draftFiles.map((d) => html`<${E.Switch} key=${d.path} label=${`Try the ${DRAFT_LABEL[d.type] || 'draft'} file`} checked=${!skipped.includes(d.path)}
+        onChange=${(e) => setSkipped(e.target.checked ? skipped.filter((x) => x !== d.path) : [...skipped, d.path])}
+        description=${`Tests --spec-type ${d.type} with ${d.name} (${fmtBytes(d.size)}) at ${draftLengths(d).join(', ')} draft tokens. The file needs VRAM of its own, and acceptance is measured with greedy decoding.`} />`)}
       <div className="grid grid--2" style=${{ gap: 'var(--space-4)' }}>
         <${E.TextField} label="Preset name" optional value=${name} onChange=${(e) => setName(e.target.value)}
           placeholder=${m ? `${m.name} · ${ctxLabel(Number(ctx))} · tuned` : ''} />
@@ -255,7 +269,13 @@ function tuneCommand(tune, best) {
   const tuned = c.ngl === 'auto' ? [{ flag: '--fit', value: 'on' }] : [{ flag: '-ngl', value: c.ngl }, { flag: '--fit', value: 'off' }];
   if (c.ncmoe) tuned.push({ flag: '--n-cpu-moe', value: c.ncmoe });
   tuned.push(...[['-c', c.ctx], ['-np', c.np], ['-fa', c.fa], ['-ctk', c.ctk], ['-ctv', c.ctv], ['-ub', c.ub], ['-b', c.b]].map(([flag, value]) => ({ flag, value })));
-  if (c.spec) tuned.push({ flag: '--spec-type', value: c.spec }, { flag: '--spec-draft-n-max', value: c.nmax });
+  if (c.spec) {
+    tuned.push({ flag: '--spec-type', value: c.spec });
+    if (c.draft) tuned.push({ flag: '-md', value: c.draft });
+    tuned.push({ flag: '--spec-draft-n-max', value: c.nmax });
+  }
+  if (c.threads) tuned.push({ flag: '-t', value: c.threads });
+  if (c.threads_batch) tuned.push({ flag: '-tb', value: c.threads_batch });
   return commandLine(tune.model, [...(tune.params.base ? tune.params.base.flags : []), ...tuned], tune.params.base ? tune.params.base.env : {});
 }
 

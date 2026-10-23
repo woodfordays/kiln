@@ -550,6 +550,7 @@ class TuneBody(BaseModel):
     objective: str = "decode"
     depth: int = 8192
     speculative: bool = True
+    drafts: list[str] | None = None  # draft files to try; default: the nearest of each kind next to the model
     base_preset_id: int | None = None
     headroom_mib: int = 512
     name: str = ""
