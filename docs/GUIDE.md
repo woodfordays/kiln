@@ -254,10 +254,11 @@ you need.
 | Model, Target context | What to tune and the context it must hold. The tuner keeps the context fixed. |
 | Benchmark depth | Length of the deep prompt. Deeper is more realistic and slower. |
 | Keep other flags from | A preset whose sampling, template and environment flags carry over. Memory and speed flags are re-tuned. |
-| Optimize for | *Generation*, *Balanced*, *Prompt processing*, or *Context length*, which moves weights to system RAM until the whole context fits. |
+| Optimize for | *Generation*, *Balanced*, *Prompt processing*, or *Context length*, which moves weights to system RAM until the whole context fits, then tries CPU thread counts (`-t`, `-tb`) on the fastest spill. |
 | Search | *Every combination*, or *One flag at a time* (faster, can miss combinations that only work together). |
 | KV cache types | The most precise type that fits, or every type that fits. |
 | MTP | For models with an MTP head, also try self-speculative decoding with 1 to 5 draft tokens. |
+| Draft files | One switch for each kind of draft file next to the model (DSpark, DFlash, EAGLE-3, a plain draft model): also try it at a few draft lengths. A run with both an MTP head and a draft file measures both and keeps the faster. |
 | Preset name | Defaults to `<model> · <context> · tuned`. |
 | Start the winning preset when done | On: the winner starts when tuning ends. Off: the model that was running before comes back. |
 

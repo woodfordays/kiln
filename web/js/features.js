@@ -57,6 +57,18 @@ export function kvUnifiedNote(kv) {
     : `-c is split evenly between the ${kv.slots} slots, and a slot can't borrow room from another.`;
 }
 
+/* The draft lengths worth measuring for a draft file (the tuner's ladder: see _draft_lengths in tuner.py). */
+export function draftLengths(d) {
+  const block = Number(d.block_size) || 0;
+  let steps;
+  if (d.type === 'draft-dflash') { const n = block || 15; steps = [Math.max(1, n >> 2), Math.max(1, n >> 1), n]; }
+  else if (d.type === 'draft-dspark') steps = [3, 5, 7, 10];
+  else if (d.type === 'draft-eagle3') steps = [2, 3, 4, 5];
+  else steps = [4, 8, 16];
+  if (block) steps = steps.map((n) => Math.min(n, block));
+  return [...new Set(steps)].sort((a, b) => a - b);
+}
+
 export function readFeatures(rows) {
   const mm = find(rows, MMPROJ);
   const spec = find(rows, SPEC);

@@ -401,7 +401,7 @@ with `enabled: false` stays in the preset but isn't passed to llama-server. Flag
 
 | Method | Path | Body / query | Returns |
 |---|---|---|---|
-| POST | `/api/tune` | `model`, `ctx`; `objective="decode"` (`decode`, `balanced`, `prefill`, `context`), `depth=8192`, `speculative=true`, `base_preset_id=null`, `headroom_mib=512`, `name=""`, `start_after=false`, `mode="grid"` (`grid`, `quick`), `kv_policy="precise"` (`precise`, `all`), `vary_batch=false` | `{id}`. `409` if a run is in progress. |
+| POST | `/api/tune` | `model`, `ctx`; `objective="decode"` (`decode`, `balanced`, `prefill`, `context`), `depth=8192`, `speculative=true`, `drafts=null` (paths of draft files to try; by default the nearest file of each kind next to the model, or none when `speculative` is `false`), `base_preset_id=null`, `headroom_mib=512`, `name=""`, `start_after=false`, `mode="grid"` (`grid`, `quick`), `kv_policy="precise"` (`precise`, `all`), `vary_batch=false` | `{id}`. `409` if a run is in progress. |
 | POST | `/api/tune/cancel` | | `{ok}` |
 | GET | `/api/tune` | `?limit=20` | `{live, tunes}`: recent runs with params, trials, best, status |
 | GET | `/api/tune/{id}` | | One run, plus `live` if it's the current one |
