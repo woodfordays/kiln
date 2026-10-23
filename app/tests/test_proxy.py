@@ -7,7 +7,7 @@ import unittest.mock
 
 import httpx
 
-from kiln import db, decider, proxy
+from kiln import api, db, decider, proxy
 from kiln.server import manager
 from . import ROOT
 from .helpers import decider_checkpoint, fake_gpu, llm, make_preset
@@ -223,6 +223,20 @@ class ProxyTests(unittest.IsolatedAsyncioTestCase):
         bad = await self.http.post("/v1/systemone", json={"questions": {}})
         self.assertEqual(bad.status_code, 400)
         self.assertEqual(self.rows("endpoint='/v1/systemone'")[-1]["status"], 400)
+
+    async def test_the_ui_call_builder_goes_through_the_api_port(self):
+        await self.up("decider", path=decider_checkpoint(ROOT / "models" / "dec3.gguf"), role="decision")
+        ui = httpx.AsyncClient(transport=httpx.ASGITransport(app=api.app), base_url="http://kiln", timeout=60)
+        self.addAsyncCleanup(ui.aclose)
+        r = await ui.post("/api/decide", json={"state": "x", "questions": {"q": {"type": "noul"}}})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertIn("noul", r.json()["answers"]["q"])
+        self.assertEqual(r.headers["x-kiln-model"], "decider")
+        row = self.rows("endpoint='/v1/systemone'")[-1]
+        self.assertEqual((row["status"], row["client"]), (200, "kiln-ui"))
+        bad = await ui.post("/api/decide", json={"state": "x", "questions": {"q": {"type": "rank"}}})
+        self.assertEqual(bad.status_code, 400)
+        self.assertIn("must be one of", bad.json()["error"]["message"])
 
     async def test_decision_requests_without_a_decision_model(self):
         await self.up("alpha")

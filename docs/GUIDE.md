@@ -51,7 +51,7 @@ every client is counted on the dashboard.
 
 ![Kiln overview](screenshots/overview.png)
 
-- **The side navigation** has the six working pages and **Settings**. Pages are addressed by the part of
+- **The side navigation** has the seven working pages and **Settings**. Pages are addressed by the part of
   the URL after `#`, such as `#/server` or `#/tuner`, so you can bookmark them.
 - **The status block** at the bottom of the navigation shows whether a model is running. With several
   models running it lists each by API name, with a dot that is lit while that model is ready.
@@ -275,6 +275,27 @@ second measurement of the top three, and the *Winner* is the simplest finalist u
 2%. **Past runs** keeps every run, including failed and cancelled ones.
 
 How the search works, in order, and how scores are computed, is in [TUNER.md](TUNER.md).
+
+## Decide
+
+A call builder for decision models (`/v1/systemone`). Write the **State** the model should classify, as text
+or JSON, and add questions:
+
+- **Choice** picks one of named options. Each option has a name (the key in the answer) and an optional
+  description the model reads.
+- **Yes / no** answers with the probability that the question is true. You can say what yes and no mean.
+- **Score** places the state on an ordered scale, lowest first, and answers with the expected level
+  (0 is the first) and a probability per level.
+
+**Run** (or Ctrl+Enter) sends the call to the decision model and shows each answer with a bar per option; the
+winner is highlighted and the headline gives its probability. The call goes through the API port like any
+client's, so it can load a decision preset that isn't running, and it shows up under Requests with the client
+`kiln-ui`. Fields the server would reject are marked before you can run, and errors from the model (too many
+options for the checkpoint, a request longer than the context) appear in the Answer card.
+
+**Code** shows the same call as curl, Python, JavaScript or the bare JSON body, addressed to this Kiln's API
+URL, ready to copy. **Start from…** loads a template (support triage, moderation, blank) and **Paste JSON** loads
+an existing request body into the builder. The draft is kept in your browser between visits.
 
 ## Requests
 
