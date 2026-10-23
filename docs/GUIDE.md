@@ -265,6 +265,13 @@ you need.
 The form shows how many candidates to expect and a rough time. **The tuner stops the running models** while it
 works and the API port answers `503` in between. You get a notification when it finishes.
 
+**While it runs**, the progress bar shows the candidate being measured, and a row of stages below it shows where
+the run is: finished stages are checked, the one in progress shows how many of its candidates are done, and the
+rest wait with the most they will run. A stage with nothing to try (flash attention when the V cache is
+quantized, say) is marked skipped. Some sizes sharpen as the run learns them: the grid's exact count appears once
+the KV types are chosen, and the thread stage shrinks once `-t` is. The stages are the ones listed in
+[TUNER.md](TUNER.md).
+
 **Results.** A winner card shows decode and prefill speed, draft acceptance and free VRAM, the command line it
 found, and buttons to open or start the preset. **Candidates** lists every trial with its stage, result, speeds and
 score. Sort by any column.

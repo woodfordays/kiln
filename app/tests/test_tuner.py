@@ -222,3 +222,73 @@ class UnitTests(unittest.TestCase):
         old = {k: v for k, v in c.items() if k not in ("draft", "threads", "threads_batch")}
         self.assertNotIn("-md", tuner_mod._tuned_args({**old, "spec": None}))
         self.assertIn("-md", tuner_mod._tuned_args({**old, "draft": "/m/d.gguf"}))
+
+
+class PlanTests(Case):
+    """The stage plan the Tuner page draws: what is left to run, with sizes that sharpen as the run learns them."""
+
+    async def watch(self, model, **params):
+        snaps = []
+        with mock.patch.object(tuner, "_publish", side_effect=lambda: snaps.append((tuner.stage, [dict(e) for e in tuner.plan]))):
+            t = await self.tune(model, **params)
+        self.assertEqual(t["status"], "done", t.get("error"))
+        return t, snaps
+
+    @staticmethod
+    def sizes(snaps, step_id):
+        """The sizes a step went through, in order, without repeats."""
+        out = []
+        for _, plan in snaps:
+            n = next((e["max"] for e in plan if e["id"] == step_id), "absent")
+            if n != "absent" and (not out or out[-1] != n):
+                out.append(n)
+        return out
+
+    async def test_the_grid_size_is_exact_once_the_kv_types_are_known(self):
+        t, snaps = await self.watch(llm(DIR / "plan-grid" / "plain-Q4.gguf"), objective="decode")
+        grid = [x for x in t["trials"] if x["stage"] == "Grid"]
+        self.assertEqual(self.sizes(snaps, "grid"), [None, 11])  # 3 flash-attention x 4 -ub, less the first fit that already ran
+        self.assertEqual(len(grid), 11)
+        first_grid = next(i for i, (stage, _) in enumerate(snaps) if stage == "Grid")
+        self.assertEqual(snaps[first_grid][1][1]["max"], 11)  # known before the first of them (plan[1] is the grid)
+        self.assertEqual([e["id"] for e in snaps[0][1]], ["kv", "grid", "confirm"])
+
+    async def test_a_quantized_v_cache_removes_the_flash_attention_stage(self):
+        t, snaps = await self.watch(llm(DIR / "plan-quick" / "plain-Q4.gguf"), mode="quick")
+        self.assertEqual(self.sizes(snaps, "fa"), [2])
+        self.assertEqual(len([x for x in t["trials"] if x["stage"] == "Flash attention"]), 2)
+        self.assertEqual(len([x for x in t["trials"] if x["stage"] == "Batch size"]), 3)  # the first fit already ran 512
+        with mock.patch.object(tuner_mod, "KV_LADDER", [("q8_0", "q4_0")]):
+            t, snaps = await self.watch(llm(DIR / "plan-quick" / "plain-Q4.gguf"), mode="quick")
+        self.assertEqual(self.sizes(snaps, "fa"), [2, 0])  # nothing to try with a quantized V cache
+        self.assertFalse([x for x in t["trials"] if x["stage"] == "Flash attention"])
+
+    async def test_the_thread_stage_shrinks_to_what_is_left_after_the_generation_threads_are_chosen(self):
+        with mock.patch.dict(os.environ, {"FAKE_AUTO_THREADS": "8"}):
+            t, snaps = await self.watch(llm(DIR / "plan-threads" / "moe-Q4.gguf", arch="qwen35moe", layers=8,
+                                            **{"qwen35moe.expert_count": 8}), objective="context")
+        sweep = [x for x in t["trials"] if x["stage"] == "Threads"]
+        self.assertEqual(self.sizes(snaps, "threads"), [None, 5, 4])  # 3 generation + 2 batch, then -t 8 stays and one batch is left
+        self.assertEqual(len(sweep), 4)
+
+    async def test_speculative_stages_are_planned_per_kind_and_the_plan_is_gone_afterwards(self):
+        d = DIR / "plan-spec"
+        model = llm(d / "Fake-Q4.gguf", arch="qwen35", **{"qwen35.nextn_predict_layers": 1})
+        dspark(d)
+        t, snaps = await self.watch(model, mode="quick")
+        plan = snaps[0][1]
+        self.assertEqual([(e["id"], e["max"]) for e in plan if e["id"].startswith("spec:")], [("spec:MTP", 5), ("spec:DSpark", 4)])
+        self.assertEqual([e["stages"] for e in plan if e["id"].startswith("spec:")], [["Speculative (MTP)"], ["Speculative (DSpark)"]])
+        self.assertEqual(tuner.plan, [])
+        self.assertEqual(tuner.live()["plan"], [])
+        self.assertEqual(set(tuner.live()), {"running", "tune_id", "stage", "trial", "plan"})
+        self.assertNotIn("plan", tuner.status())  # /api/status stays as it was
+
+    async def test_every_stage_a_run_reports_is_in_its_plan(self):
+        for kwargs, directory in (({"objective": "decode"}, "grid"), ({"mode": "quick"}, "quick")):
+            t, snaps = await self.watch(llm(DIR / "plan-cover" / directory / "plain-Q4.gguf"), **kwargs)
+            planned = {name for _, plan in snaps[:1] for e in plan for name in e["stages"]}
+            self.assertLessEqual({x["stage"] for x in t["trials"]}, planned)
+        model = llm(DIR / "plan-cover" / "spill" / "moe-Q4.gguf", arch="qwen35moe", layers=8, **{"qwen35moe.expert_count": 8})
+        t, snaps = await self.watch(model, objective="context")
+        self.assertLessEqual({x["stage"] for x in t["trials"]}, {name for e in snaps[0][1] for name in e["stages"]})

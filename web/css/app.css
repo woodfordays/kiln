@@ -232,3 +232,24 @@ code, kbd { font-family: var(--font-mono); }
 .prob.is-top { color: var(--ink); }
 .prob.is-top .prob__fill { background: var(--ember); }
 .prob__pct { text-align: right; }
+
+/* ---------------------------------------------------------------- tuner stage tracker */
+.stages { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: var(--space-2); margin: 0; padding: 0; list-style: none; }
+.stage { display: flex; align-items: flex-start; gap: var(--space-2); min-width: 0; padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--line); border-radius: var(--radius-md); color: var(--ink-subtle);
+  transition: background var(--em-fast) var(--em-ease), border-color var(--em-fast) var(--em-ease); }
+.stage__mark { flex: none; display: grid; place-items: center; width: 16px; height: 16px; margin-top: 1px; }
+.stage__dot { width: 8px; height: 8px; border-radius: 50%; border: 1px solid currentColor; box-sizing: border-box; }
+.stage__body { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
+.stage__label { color: var(--ink-muted); overflow-wrap: anywhere; }
+.stage__count { color: var(--ink-subtle); font-variant-numeric: tabular-nums; }
+.stage__bar { display: block; height: 3px; margin-top: var(--space-1); border-radius: var(--radius-full); background: var(--line); overflow: hidden; }
+.stage__bar > span { display: block; height: 100%; border-radius: inherit; background: var(--ember); transition: width var(--em-slow) var(--em-ease); }
+.stage.is-done { color: var(--success); }
+.stage.is-done .stage__label { color: var(--ink); }
+.stage.is-done .stage__bar > span { background: var(--success); }
+.stage.is-running { border-color: var(--ember); background: var(--ember-soft); color: var(--ember); }
+.stage.is-running .stage__label { color: var(--ink); }
+.stage.is-running .stage__count { color: var(--ink-muted); }
+.stage.is-skipped { border-style: dashed; }
+.stage.is-skipped .stage__label { text-decoration: line-through; text-decoration-color: var(--ink-disabled); }

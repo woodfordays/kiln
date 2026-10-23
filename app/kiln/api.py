@@ -596,7 +596,7 @@ async def tune_cancel():
 async def tune_list(limit: int = 20):
     rows = db.rows("SELECT id FROM tunes ORDER BY id DESC LIMIT ?", (limit,))
     out = [get_tune(r["id"]) for r in rows]
-    return {"live": tuner.status(), "tunes": out}
+    return {"live": tuner.live(), "tunes": out}
 
 
 @app.get("/api/tune/{tid}")
@@ -604,7 +604,7 @@ async def tune_get(tid: int):
     t = get_tune(tid)
     if not t:
         raise LookupError("No such tuning run.")
-    t["live"] = tuner.status() if tuner.tune_id == tid else None
+    t["live"] = tuner.live() if tuner.tune_id == tid else None
     return t
 
 

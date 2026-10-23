@@ -174,6 +174,7 @@ is `ready` if any model is, else `loading`, `stopping`, `crashed` or `stopped`.
 
 **`tune`**: the tuner. `running` is `true` during a run, and then `server.blocked` is set too.
 `stage` and `trial` describe the current candidate, for example `"Grid"` and `"-ctk q8_0 -ctv q8_0 · -fa on · -ub 512 -b 2048 · no spec"`.
+The `live` object of the tuner endpoints and events also carries `plan` (see below); `/api/status` doesn't.
 
 **`downloads.active`**: queued plus downloading Hugging Face downloads.
 
@@ -252,7 +253,7 @@ es.addEventListener('status', (e) => render(JSON.parse(e.data)));
 |---|---|---|
 | `status` | Full fleet status (as from `POST /api/server/start`), `instances` included | Any state change of any model |
 | `presets` | `{"changed": true}` | A preset was created, edited, duplicated, deleted, or saved by the tuner. Refetch `/api/quick`. |
-| `tune` | Tuning run row plus `live` (`{running, tune_id, stage, trial}`) | Each tuner step, and once at the end with `status` set to `done`, `failed` or `cancelled` |
+| `tune` | Tuning run row plus `live` (`{running, tune_id, stage, trial, plan}`) | Each tuner step, and once at the end with `status` set to `done`, `failed` or `cancelled` |
 | `tune_note` | `{"message": "..."}` | After tuning, if the previous server couldn't be restarted |
 | `download` | Download row (`id, repo, variant, status, done_bytes, total_bytes, speed, eta_s, error`), or `{id, removed: true}` | Queue changes and progress (up to twice a second). `status`: `queued`, `downloading`, `done`, `failed`, `cancelled` |
 | `idle_unload` | `{"run_id", "name", "idle_s"}` | Kiln is stopping a model because it was idle for the idle timeout. The `status` events that follow show it leaving `instances` |
@@ -404,7 +405,7 @@ with `enabled: false` stays in the preset but isn't passed to llama-server. Flag
 |---|---|---|---|
 | POST | `/api/tune` | `model`, `ctx`; `objective="decode"` (`decode`, `balanced`, `prefill`, `context`), `depth=8192`, `speculative=true`, `drafts=null` (paths of draft files to try; by default the nearest file of each kind next to the model, or none when `speculative` is `false`), `base_preset_id=null`, `headroom_mib=512`, `name=""`, `start_after=false`, `mode="grid"` (`grid`, `quick`), `kv_policy="precise"` (`precise`, `all`), `vary_batch=false` | `{id}`. `409` if a run is in progress. |
 | POST | `/api/tune/cancel` | | `{ok}` |
-| GET | `/api/tune` | `?limit=20` | `{live, tunes}`: recent runs with params, trials, best, status |
+| GET | `/api/tune` | `?limit=20` | `{live, tunes}`: recent runs with params, trials, best, status. `live.plan` is the ordered list of stages of the run in progress (empty otherwise): `{id, label, stages, max}`, where `stages` are the `stage` names its trials carry and `max` is the most trials it will measure, or `null` while that isn't known. |
 | GET | `/api/tune/{id}` | | One run, plus `live` if it's the current one |
 
 ### Stats and requests
