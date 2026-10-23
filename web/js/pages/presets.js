@@ -3,7 +3,7 @@ import {
   html, E, useState, useEffect, useMemo, useRef, api, useApp, useFetch, useEvent, useNow,
   fmtWhen, fmtBytes, copyText, commandLine, modelLabel, RoleBadge, ROLE_LABEL, liveOf, fmtMiB,
 } from '../lib.js';
-import { chipsFor, toggleChip, readFeatures, setVision, setSpec, DRAFT_LABEL } from '../features.js';
+import { chipsFor, toggleChip, readFeatures, setVision, setSpec, setKvUnified, kvUnifiedNote, DRAFT_LABEL } from '../features.js';
 
 let flagMetaPromise = null;
 function useFlagMeta() {
@@ -107,7 +107,8 @@ export function PresetsPage({ arg }) {
     { key: 'model', header: 'Model', render: (p) => html`<span className="truncate" style=${{ maxWidth: 190, display: 'inline-block' }} title=${p.model}>${modelLabel(p.model) || html`<span className="subtle">None</span>`}</span>` },
     { key: 'features', header: 'Features', render: (p) => {
       const lib = libOf(p);
-      const chips = chipsFor(lib, p.flags, { noVision: p.role === 'decision' && lib && lib.decision && lib.decision.kind === 'pplx-v3' });
+      const scored = p.role === 'decision' && lib && lib.decision && lib.decision.kind === 'pplx-v3';
+      const chips = chipsFor(lib, p.flags, { noVision: scored, noKvUnified: scored });
       return chips.length ? html`<div className="chips">${chips.map((c) => html`<${FeatureChip} key=${c.id} chip=${c} onToggle=${() => flip(p, c)} />`)}</div>` : html`<span className="subtle">–</span>`;
     } },
     { key: 'flags', header: 'Flags', mono: true, render: (p) => html`<span className="truncate subtle" style=${{ maxWidth: 200, display: 'inline-block' }} title=${commandLine('', p.flags, p.env)}>${commandLine('', p.flags, p.env).replace(/^llama-server ?/, '') || '–'}</span>` },
@@ -323,15 +324,16 @@ function RoleNote({ role, decision }) {
   return null;
 }
 
-/* Vision and speculative decoding for the chosen model. Switching one off keeps its flags in the preset
-   (greyed out in the list below) so it comes back as it was. */
+/* Vision, speculative decoding and the unified KV cache for the chosen model. Switching one off keeps
+   its flags in the preset (greyed out in the list below) so it comes back as it was. */
 function FeaturesPanel({ model, role, rows, onChange }) {
   const f = readFeatures(rows);
   const projectors = (model && model.projectors) || [];
   const drafts = (model && model.drafts) || [];
   const hasMtp = !!(model && model.nextn_layers) || f.spec.type === 'draft-mtp';
+  const hasKv = !!(model && model.kv_cache) || f.kv.present;
   const adapter = model && model.decision && model.decision.kind === 'pplx-v3' && role === 'decision';
-  const special = !!(projectors.length || drafts.length || hasMtp || f.vision.present || f.spec.type);
+  const special = !!(projectors.length || drafts.length || hasMtp || hasKv || f.vision.present || f.spec.type);
   if (!special || adapter) return null;
 
   const draftOf = (path) => drafts.find((d) => d.path === path);
@@ -350,7 +352,7 @@ function FeaturesPanel({ model, role, rows, onChange }) {
     return onChange(setSpec(rows, 'draft', d));
   };
   const projectorValue = f.vision.path || projectors[0] || '';
-  return html`<${E.Card} title="Model features" description="Extra files that come with this model. Switch them on or off here; the flags stay in the preset.">
+  return html`<${E.Card} title="Model features" description="What this model can do, and the extra files that come with it. Switch them on or off here; the flags stay in the preset.">
     <div className="stack">
       ${(projectors.length > 0 || f.vision.present) && html`<div className="stack stack--sm">
         <${E.Switch} label="Vision" checked=${f.vision.on} onChange=${(e) => onChange(setVision(rows, e.target.checked, projectorValue))}
@@ -361,6 +363,8 @@ function FeaturesPanel({ model, role, rows, onChange }) {
       </div>`}
       ${(hasMtp || drafts.length > 0 || f.spec.type) && html`<${E.Select} label="Speculative decoding" value=${specValue} onChange=${(e) => onSpec(e.target.value)} options=${specOpts}
         hint=${f.spec.mode === 'off' ? 'Off: tokens are generated one at a time.' : `--spec-type ${f.spec.type}${f.spec.mode === 'draft' ? ' with the draft file above' : ''}. Tune the draft length with --spec-draft-n-max below.`} />`}
+      ${hasKv && html`<${E.Switch} label="Unified KV cache" checked=${f.kv.on} onChange=${(e) => onChange(setKvUnified(rows, e.target.checked))}
+        description=${kvUnifiedNote(f.kv)} />`}
     </div>
   <//>`;
 }

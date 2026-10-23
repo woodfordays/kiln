@@ -177,6 +177,7 @@ or delete it. Deleting a preset keeps its run history and request statistics.
 | Vision | Loads the model's vision projector (`--mmproj`), found next to the model. |
 | MTP | Turns on the multi-token-prediction head built into some models (`--spec-type draft-mtp`). |
 | DSpark, DFlash, EAGLE-3, Draft model | Uses a draft file found next to the model for speculative decoding. |
+| KV unified | Makes the slots (`-np`) share one KV pool (`--kv-unified`) instead of each getting an equal slice of `-c`. Offered for every model with an attention cache, which is all but recurrent (Mamba, RWKV) and encoder models. It only matters with more than one slot. |
 
 Switching a feature off doesn't delete its flags. They stay in the preset, greyed out and skipped, so switching it
 back on restores the draft length and the rest. If the preset's model is running, the toast that appears has a
@@ -196,7 +197,8 @@ drops `--host` and `--port`, because it manages those.
 - **API name** is what clients put in `model`. It defaults to the preset name.
 - **Keep loaded** pins the preset: it is never stopped to make room for another model, by a request or by
   **Start**, and never unloaded for being idle.
-- **Model features** has the Vision switch and a *Speculative decoding* choice (off, MTP, or each draft file).
+- **Model features** has the Vision switch, a *Speculative decoding* choice (off, MTP, or each draft file) and
+  the *Unified KV cache* switch.
 - **Flags.** The editor knows every flag the compiled `llama-server` reports in `--help`, so it always matches
   the binary: it autocompletes names, offers choices for flags that have them, and shows the description and the
   environment variable under each row. A flag the build doesn't know is marked, because llama-server will
