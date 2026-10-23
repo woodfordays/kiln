@@ -72,6 +72,9 @@ curl http://localhost:8080/v1/systemone -H 'Content-Type: application/json' -d '
   }}'
 ```
 
+The **Decide** page in the UI builds these requests with a form, runs them on the loaded decision model, and
+gives the call as curl, Python or JavaScript.
+
 - Models whose GGUF carries llama.cpp's `<arch>.decision.type` (OpenJev, lev, Laya, Kev and the like) are
   served by `llama-server` itself. Kiln routes and records the requests.
 - **Perplexity's pplx-decider checkpoints (protocol v3)**, such as `decider-flash-v1.2`, are not: stock
