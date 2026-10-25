@@ -295,6 +295,30 @@ async def decide(request: Request):
     return Response(r.content, status_code=r.status_code, media_type="application/json", headers=headers)
 
 
+@app.post("/api/audio/{kind}")
+async def audio(kind: str, request: Request):
+    """The Audio page's Generate and Transcribe buttons, passed to the API port's /v1/audio/speech and
+    /v1/audio/transcriptions the same way /api/decide is: routed and recorded like any client's call, and the
+    page needs no cross-origin access to the API port. The body (JSON or multipart) goes through untouched."""
+    if kind not in ("speech", "transcriptions"):
+        raise HTTPException(404, "Not found")
+    transport = httpx.ASGITransport(app=proxy.app, client=("kiln-ui", 0))
+    async with httpx.AsyncClient(transport=transport, base_url="http://kiln", timeout=None) as c:
+        r = await c.post(f"/v1/audio/{kind}", content=await request.body(),
+                         headers={"content-type": request.headers.get("content-type", "application/octet-stream")})
+    headers = {"X-Kiln-Model": r.headers["x-kiln-model"]} if "x-kiln-model" in r.headers else {}
+    return Response(r.content, status_code=r.status_code, media_type=r.headers.get("content-type"), headers=headers)
+
+
+@app.get("/api/audio/voices")
+async def audio_voices(model: str = ""):
+    """The voices a text-to-speech model offers, for the Audio page's voice picker."""
+    transport = httpx.ASGITransport(app=proxy.app, client=("kiln-ui", 0))
+    async with httpx.AsyncClient(transport=transport, base_url="http://kiln", timeout=30) as c:
+        r = await c.get("/v1/audio/voices", params={"model": model} if model else None)
+    return Response(r.content, status_code=r.status_code, media_type=r.headers.get("content-type"))
+
+
 @app.get("/api/runs")
 async def runs(limit: int = 50):
     rows = db.rows("SELECT * FROM runs ORDER BY id DESC LIMIT ?", (limit,))

@@ -51,7 +51,7 @@ every client is counted on the dashboard.
 
 ![Kiln overview](screenshots/overview.png)
 
-- **The side navigation** has the seven working pages and **Settings**. Pages are addressed by the part of
+- **The side navigation** has the eight working pages and **Settings**. Pages are addressed by the part of
   the URL after `#`, such as `#/server` or `#/tuner`, so you can bookmark them.
 - **The status block** at the bottom of the navigation shows whether a model is running. With several
   models running it lists each by API name, with a dot that is lit while that model is ready.
@@ -304,6 +304,24 @@ options for the checkpoint, a request longer than the context) appear in the Ans
 **Code** shows the same call as curl, Python, JavaScript or the bare JSON body, addressed to this Kiln's API
 URL, ready to copy. **Start from…** loads a template (support triage, moderation, blank) and **Paste JSON** loads
 an existing request body into the builder. The draft is kept in your browser between visits.
+
+## Audio
+
+A playground for text-to-speech and speech-to-text models (presets with the **tts** and **stt** roles).
+
+- **Text to speech.** Type something, or click one of the example sentences to generate it straight away.
+  Pick a voice (the list comes from the model), WAV or raw PCM, and a speed, then **Generate** (or
+  Ctrl+Enter). The result plays in the page and can be downloaded. **Transcribe this** sends it to the
+  speech-to-text card.
+- **Speech to text.** **Record** from the microphone or **Upload** a file, optionally give a language, and
+  **Transcribe**. The model reads WAV only, so the page converts recordings and other formats to 16 kHz mono
+  WAV first. The transcript shows with the server's timings. Recording needs a secure page: open Kiln over
+  https or on `localhost`, or upload a file instead.
+- **Round trip** speaks a sentence and transcribes what it hears in one click, and shows the word error rate.
+- **Code** shows both calls as curl, addressed to this Kiln's API URL.
+
+Calls go through the API port like any client's, so they can load an audio preset that isn't running and they
+show up under Requests with the client `kiln-ui`. The drafts are kept in your browser between visits.
 
 ## Requests
 
