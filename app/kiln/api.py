@@ -621,6 +621,7 @@ class TuneBody(BaseModel):
     mode: str = "grid"
     kv_policy: str = "precise"
     vary_batch: bool = False
+    space: dict | None = None  # per-dimension modes and values, see kiln/tunespace.py
 
 
 @app.post("/api/tune")
