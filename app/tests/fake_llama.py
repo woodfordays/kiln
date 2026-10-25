@@ -56,6 +56,7 @@ PORT = int(opt("--port", default="8081"))
 ALIAS = opt("-a", "--alias", default=MODEL)
 CTX = int(opt("-c", "--ctx-size", default="4096"))
 LOAD_S = float(os.environ.get("FAKE_LOAD_S", "0.3"))
+NP = max(1, int(opt("-np", "--parallel", default="1")))
 EMBED = "--embeddings" in args or "--embedding" in args
 T0 = time.time()
 LOG = os.environ.get("FAKE_LOG")
@@ -69,6 +70,11 @@ SPEC_N = int(opt("--spec-draft-n-max", default="3"))
 
 print(f"fake llama-server: {MODEL} on {PORT} alias={ALIAS}", flush=True)
 print(f"llama threadpool init, n_threads = {THREADS}", flush=True)
+for line in ("load_tensors:      Vulkan0 model buffer size =  1234.00 MiB",
+             "load_tensors:   CPU_Mapped model buffer size =    50.00 MiB",
+             "llama_kv_cache:    Vulkan0 KV buffer size =   256.00 MiB",
+             "sched_reserve:    Vulkan0 compute buffer size =   300.00 MiB"):
+    print(line, flush=True)
 
 
 def completion_timings(n_predict: int, n_prompt: int) -> dict:
@@ -139,8 +145,13 @@ class H(BaseHTTPRequestHandler):
                 return self._send(503, {"error": {"message": "Loading model"}})
             return self._send(200, {"status": "ok"})
         if self.path.startswith("/props"):
-            return self._send(200, {"default_generation_settings": {"n_ctx": CTX}, "total_slots": 1,
+            return self._send(200, {"default_generation_settings": {"n_ctx": CTX}, "total_slots": NP,
                                     "build_info": "fake-1", "modalities": {"vision": False}, "model_alias": ALIAS})
+        if self.path.startswith("/slots"):
+            cell, t = CTX // NP, int(time.time() - T0)
+            return self._send(200, [{"id": i, "n_ctx": cell, "is_processing": i == 0,
+                                     "n_prompt_tokens": (t * 37 + i * cell // 3) % cell,
+                                     "next_token": [{"n_decoded": (t * 5 + i) % 200}]} for i in range(NP)])
         if self.path.startswith("/metrics"):
             text = ("# HELP llamacpp:prompt_tokens_total Number of prompt tokens processed.\n"
                     "# TYPE llamacpp:prompt_tokens_total counter\n"

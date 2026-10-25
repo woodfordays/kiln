@@ -3,6 +3,7 @@ import {
   html, E, useState, useEffect, useRef, useMemo, api, useApp, useFetch, useEvent, useNow,
   fmtInt, fmtDuration, fmtMs, fmtWhen, isNum, StateBadge, RoleBadge, liveOf, crashedOf, fmtMiB, copyText, shellQuote, modelLabel,
 } from '../lib.js';
+import { BreakdownCard, ContextFillCard } from '../memviz.js';
 
 // llama-server's chat page, served by Kiln under chat/<model>/. Relative, so it keeps the scheme, host
 // and path prefix of the page it opens from (an HTTPS reverse proxy has no :8080 to go to).
@@ -56,6 +57,8 @@ export function ServerPage() {
     <div className="grid grid--side">
       <${StartCard} status=${status} presets=${presets.data || []} busy=${busy} act=${act} />
       <${MemoryCard} status=${status} />
+      <${ContextFillCard} />
+      ${all.filter((i) => i.state === 'loading' || i.state === 'ready').map((i) => html`<${BreakdownCard} key=${i.run_id} runId=${i.run_id} title=${`Memory · ${i.name}`} />`)}
     </div>
 
     ${sel && sel.argv && sel.argv.length > 0 && html`<${CommandCard} inst=${sel} />`}
