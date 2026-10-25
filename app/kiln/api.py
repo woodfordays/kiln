@@ -10,10 +10,11 @@ import os
 import re
 import secrets
 import time
+from urllib.parse import quote
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -675,6 +676,34 @@ async def event_stream(request: Request):
 @app.get("/")
 async def index():
     return FileResponse(config.WEB_DIR / "index.html", headers={"Cache-Control": "no-cache"})
+
+
+# llama-server's own chat page, same-origin under /chat/<model>/ so it works wherever Kiln's UI does:
+# behind an HTTPS reverse proxy, under a path prefix, or on plain HTTP. Its page uses relative URLs
+# (./_app/..., ./v1/chat/completions, ./props), so everything below the model segment goes to that
+# model's llama-server. Redirects are relative too, so they keep the scheme, host and prefix.
+
+@app.get("/chat")
+async def chat_root():
+    return RedirectResponse("chat/", status_code=307)
+
+
+@app.get("/chat/")
+async def chat_default(request: Request):
+    name = proxy.chat_default()
+    if not name:
+        return proxy._offline(request, ui="../")
+    return RedirectResponse(f"./{quote(name, safe='')}/", status_code=307)
+
+
+@app.api_route("/chat/{model}", methods=["GET", "HEAD"])
+async def chat_model_root(model: str):
+    return RedirectResponse(f"{quote(model, safe='')}/", status_code=307)
+
+
+@app.api_route("/chat/{model}/{rest:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"])
+async def chat_passthrough(request: Request, model: str, rest: str):
+    return await proxy.handle(request, "/" + rest, model=model, ui="../" * (rest.count("/") + 2))
 
 
 app.mount("/", StaticFiles(directory=config.WEB_DIR), name="web")

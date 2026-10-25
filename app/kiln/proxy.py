@@ -14,7 +14,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingRes
 from starlette.background import BackgroundTask
 
 from . import config, db, decider, events, gpu, metrics
-from .route import resolve
+from .route import resolve, slug
 from .server import NoFit, get_preset, manager
 
 TRACKED = {
@@ -49,10 +49,12 @@ def _error(status: int, message: str, kind: str = "unavailable_error") -> JSONRe
     return JSONResponse({"error": {"code": status, "type": kind, "message": message}}, status_code=status, headers=CORS)
 
 
-def _offline(request: Request, reason: str = "") -> Response:
+def _offline(request: Request, reason: str = "", ui: str | None = None) -> Response:
+    """`ui` links back to Kiln; the chat pages on Kiln's own port pass a relative one, which survives
+    a reverse proxy (HTTPS, a path prefix) where host:port would not."""
     if request.method == "GET" and "text/html" in request.headers.get("accept", ""):
         host = request.url.hostname or "localhost"
-        return HTMLResponse(OFFLINE_PAGE.format(ui=f"//{host}:{config.PUBLIC_UI_PORT}/"), status_code=503)
+        return HTMLResponse(OFFLINE_PAGE.format(ui=ui or f"//{host}:{config.PUBLIC_UI_PORT}/"), status_code=503)
     state = manager.state
     msg = (manager.blocked or reason or ("The model is still loading." if state == "loading" else
                                          "No model is loaded. Start one from the Kiln control panel."))
@@ -407,6 +409,8 @@ async def _forward(request: Request, url_path: str, body: bytes, inst, tracked: 
 
     out_headers = {k: v for k, v in resp.headers.items() if k.lower() not in HOP}
     out_headers["X-Kiln-Model"] = inst.name
+    if "text/event-stream" in resp.headers.get("content-type", ""):
+        out_headers["X-Accel-Buffering"] = "no"  # so nginx in front passes tokens on as they come
     if rec:
         rec.start(resp.headers.get("content-type", ""))
 
@@ -468,21 +472,26 @@ async def _waiting_stream(request: Request, route, url_path: str, body: bytes, t
 
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"])
 async def proxy(request: Request, path: str):
-    url_path = "/" + path
+    return await handle(request, "/" + path)
+
+
+async def handle(request: Request, url_path: str, model: str | None = None, ui: str | None = None) -> Response:
+    """Send one request on to the llama-server that should answer it. `model` pins the server (the
+    chat pages Kiln serves under /chat/<model>/ use it); `ui` is the link back to Kiln on offline pages."""
     if manager.blocked:
-        return _offline(request)
+        return _offline(request, ui=ui)
     body = await request.body()
-    name = _model_name(request, body)
+    name = model or _model_name(request, body)
     tracked = request.method == "POST" and url_path in TRACKED
     # Only completions and the like wait for a model to load or be swapped in; a status check answers at once.
     route = resolve(name, url_path, manager.live(), _presets(), _swap_enabled() and tracked)
     if route.kind == "none":
-        return _offline(request, route.reason)
+        return _offline(request, route.reason, ui)
     if route.kind == "swap" and not _may_load(request, route.preset):
         return _error(401, "Incorrect API key provided.", "authentication_error")
     waiting = route.kind == "swap" or route.instance.state != "ready"
     if waiting and not tracked:
-        return _offline(request)
+        return _offline(request, ui=ui)
     if waiting and _wants_stream(body):
         return await _waiting_stream(request, route, url_path, body, tracked, name)
     swap_ms = 0.0
@@ -499,6 +508,12 @@ async def proxy(request: Request, path: str):
     if tracked and url_path == "/v1/systemone" and inst.adapter == "pplx-v3":
         return await _decide(request, inst, body, swap_ms)
     return await _forward(request, url_path, body, inst, tracked, swap_ms)
+
+
+def chat_default() -> str | None:
+    """The model /chat/ opens: the one an unnamed chat request would reach, as a URL segment."""
+    route = resolve(None, "/v1/chat/completions", [i for i in manager.live() if i.state == "ready"], [], False)
+    return (slug(route.instance.name) or route.instance.name) if route.kind == "instance" else None
 
 
 async def close() -> None:
