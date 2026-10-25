@@ -3,6 +3,7 @@ import { html, E, useState, useEffect, useMemo, api, useApp, useFetch, useEvent,
 import { askDesktopPermission } from '../notify.js';
 import { DRAFT_LABEL, draftLengths } from '../features.js';
 import { stageStates, stageCount, stageFill, STAGE_WORD } from '../tuneplan.js';
+import { DIMS, parseValues, toSpace, countCandidates, estimateMinutes } from '../tunespace.js';
 
 const CTX_OPTIONS = [4096, 8192, 16384, 32768, 65536, 131072, 196608, 262144];
 const ctxLabel = (n) => (n % 1024 === 0 ? `${n / 1024}K` : fmtInt(n));
@@ -32,17 +33,23 @@ const draftsOf = (m) => {
   return ((m && m.drafts) || []).filter((d) => !seen.has(d.type) && seen.add(d.type));
 };
 
-function estimate(prm, hasMtp) {
-  const spec = (hasMtp && prm.speculative ? 5 : 0) + (prm.drafts || []).reduce((n, d) => n + draftLengths(d).length, 0);
-  if (prm.objective === 'context') {
-    const kv = prm.kv_policy === 'all' ? 4 : 1;
-    return kv * (4 + 8 + 3 * 3) + 5 + spec + 3; // a benchmark and a few load-only probes per batch size, then thread counts
-  }
-  if (prm.mode === 'quick') return 4 + 2 + 4 + spec;
-  const kv = prm.kv_policy === 'all' ? 2 : 1; // typical: one or two KV types fit at a long context
-  const fa = prm.kv_policy === 'all' ? 2 : 3;
-  const batches = prm.vary_batch ? 11 : 4;
-  return kv * fa * batches * (1 + spec) + 3;
+const MAX_CANDIDATES = 4096; // the server refuses a run with more
+const SPACE_MODE_LABEL = { auto: 'Auto', off: 'Off', fixed: 'Fixed', list: 'Search' };
+const GROUPS = DIMS.reduce((g, d) => g.set(d.group, [...(g.get(d.group) || []), d]), new Map()); // group => dims, in DIMS order
+const blankSpace = () => Object.fromEntries(DIMS.map((d) => [d.key, { mode: 'auto', text: '' }]));
+const dimPlaceholder = (d) => ({ choice: d.choices && d.choices.join(', '), int: '256..2048 x2', float: '0.1, 0.5', text: 'one per line or ;' })[d.kind];
+
+/* A dimension's parsed values; fixed takes exactly one. */
+function dimValues(d, s) {
+  const r = parseValues(d, s.text);
+  if (!r.error && s.mode === 'fixed' && r.values.length !== 1) return { values: r.values, error: 'Fixed takes one value.' };
+  return r;
+}
+
+function dimCaption(d, s) {
+  if (s.mode === 'auto') return d.auto;
+  if (s.mode === 'off') return d.key === 'spec' ? 'Not searched: no speculative options' : d.key === 'ctx' ? 'Not searched: held at the target context' : `Not searched: ${d.off ? `held at ${d.off}` : 'flag left out'}`;
+  return s.mode === 'fixed' ? 'Every candidate uses this value.' : 'Only these values are tried, in the order given.';
 }
 
 export function TunerPage() {
@@ -109,7 +116,16 @@ function TuneForm({ status, onStarted }) {
   };
   const draftFiles = draftsOf(m);
   const tryDrafts = draftFiles.filter((d) => !skipped.includes(d.path));
-  const candidates = estimate({ objective, mode, kv_policy: kvPolicy, vary_batch: varyBatch, speculative, drafts: tryDrafts }, m && m.nextn_layers);
+  const [space, setSpace] = useState(blankSpace); // {key: {mode, text}}, kept across model changes
+  const specOff = space.spec.mode === 'off';
+  const sendSpec = speculative && !specOff;
+  const sendDrafts = specOff ? [] : tryDrafts;
+  let spaceSend = null;
+  let spaceError = null;
+  try { spaceSend = toSpace(space); } catch (e) { spaceError = e.message; }
+  const count = spaceError ? 0 : countCandidates({ objective, mode, kv_policy: kvPolicy, vary_batch: varyBatch, speculative: sendSpec, drafts: sendDrafts, space: spaceSend }, m);
+  const tooMany = !spaceError && count > MAX_CANDIDATES;
+  const [lo, hi] = count ? estimateMinutes(count, depth) : [0, 0];
   const running = liveOf(status).length > 0;
 
   const start = async () => {
@@ -117,9 +133,9 @@ function TuneForm({ status, onStarted }) {
     setBusy(true);
     try {
       const r = await api.post('/api/tune', {
-        model, ctx: Number(ctx), objective, depth: Number(depth), speculative, drafts: tryDrafts.map((d) => d.path),
+        model, ctx: Number(ctx), objective, depth: Number(depth), speculative: sendSpec, drafts: sendDrafts.map((d) => d.path),
         base_preset_id: base ? Number(base) : null, name, start_after: startAfter,
-        mode, kv_policy: kvPolicy, vary_batch: varyBatch,
+        mode, kv_policy: kvPolicy, vary_batch: varyBatch, space: spaceSend,
       });
       toast({ title: 'Tuning started', description: 'Each candidate loads the model, then runs the same benchmark. You will get a notification when it finishes.' });
       onStarted(r.id);
@@ -166,11 +182,12 @@ function TuneForm({ status, onStarted }) {
       </div>
       ${mode === 'grid' && !isContext && html`<${E.Checkbox} label="Also vary the logical batch (-b)" checked=${varyBatch} onChange=${(e) => setVaryBatch(e.target.checked)}
         description="Tries -b equal to -ub, 2048 and 4096 for every -ub. Nearly triples the run." />`}
-      ${m && m.nextn_layers ? html`<${E.Switch} label="Try self-speculative decoding (MTP)" checked=${speculative} onChange=${(e) => setSpeculative(e.target.checked)}
+      ${m && m.nextn_layers ? html`<${E.Switch} label="Try self-speculative decoding (MTP)" checked=${sendSpec} disabled=${specOff} onChange=${(e) => setSpeculative(e.target.checked)}
         description="Tests --spec-type draft-mtp with 1 to 5 draft tokens. Acceptance is measured with greedy decoding, which can run higher than with sampling." />` : null}
-      ${draftFiles.map((d) => html`<${E.Switch} key=${d.path} label=${`Try the ${DRAFT_LABEL[d.type] || 'draft'} file`} checked=${!skipped.includes(d.path)}
+      ${draftFiles.map((d) => html`<${E.Switch} key=${d.path} label=${`Try the ${DRAFT_LABEL[d.type] || 'draft'} file`} checked=${!skipped.includes(d.path) && !specOff} disabled=${specOff}
         onChange=${(e) => setSkipped(e.target.checked ? skipped.filter((x) => x !== d.path) : [...skipped, d.path])}
         description=${`Tests --spec-type ${d.type} with ${d.name} (${fmtBytes(d.size)}) at ${draftLengths(d).join(', ')} draft tokens. The file needs VRAM of its own, and acceptance is measured with greedy decoding.`} />`)}
+      <${SearchSpace} space=${space} setSpace=${setSpace} />
       <div className="grid grid--2" style=${{ gap: 'var(--space-4)' }}>
         <${E.TextField} label="Preset name" optional value=${name} onChange=${(e) => setName(e.target.value)}
           placeholder=${m ? `${m.name} · ${ctxLabel(Number(ctx))} · tuned` : ''} />
@@ -182,11 +199,50 @@ function TuneForm({ status, onStarted }) {
         ${startAfter ? 'The winner starts when tuning finishes.' : 'It starts again when tuning finishes.'} The API port answers 503 in between.
       <//>`}
       <div className="row row--between">
-        <span className="text-caption muted">Up to ${candidates} candidates · roughly ${Math.round(candidates * (0.5 + Number(depth) / 20000))}–${Math.round(candidates * (0.8 + Number(depth) / 8000))} minutes</span>
-        <${E.Button} variant="primary" icon="play" loading=${busy} disabled=${!model} onClick=${start}>Start tuning<//>
+        ${spaceError || tooMany
+          ? html`<span className="text-caption space-error">${spaceError || 'too many: narrow it to at most 4,096'}</span>`
+          : html`<span className="text-caption muted">Up to ${fmtInt(count)} candidates · roughly ${lo}–${hi} minutes</span>`}
+        <${E.Button} variant="primary" icon="play" loading=${busy} disabled=${!model || !!spaceError || tooMany} onClick=${start}>Start tuning<//>
       </div>
     </div>
   <//>`;
+}
+
+/* The search space: every setting in a collapsed disclosure, grouped as the tuner groups them. */
+function SearchSpace({ space, setSpace }) {
+  const changed = DIMS.filter((d) => space[d.key].mode !== 'auto').length;
+  const setDim = (key, patch) => setSpace((s) => ({ ...s, [key]: { ...s[key], ...patch } }));
+  return html`<details className="space-search">
+    <summary className="space-search__summary"><span className="text-label">Search space</span>
+      ${changed > 0 && html`<span className="text-caption muted">${changed} ${changed === 1 ? 'dimension' : 'dimensions'} changed</span>`}</summary>
+    <div className="stack">
+      <div className="row row--between">
+        <p className="field-hint text-caption">Auto is what the tuner does today. Off holds a setting out of the search. Fixed uses one value; Search tries each value given.</p>
+        <${E.Button} variant="ghost" size="sm" disabled=${!changed} onClick=${() => setSpace(blankSpace())}>Reset to defaults<//>
+      </div>
+      ${[...GROUPS].map(([group, dims]) => html`<div key=${group} className="stack stack--sm">
+        <h4 className="text-label space-group">${group}</h4>
+        ${dims.map((d) => html`<${DimRow} key=${d.key} d=${d} s=${space[d.key]} onChange=${(patch) => setDim(d.key, patch)} />`)}
+      </div>`)}
+    </div>
+  </details>`;
+}
+
+/* One setting: its name and flag, its mode, the values when fixed or searched, and what auto or off means. */
+function DimRow({ d, s, onChange }) {
+  const opts = d.modes.map((m) => ({ value: m, label: SPACE_MODE_LABEL[m] }));
+  const typed = s.mode === 'fixed' || s.mode === 'list';
+  const error = typed ? dimValues(d, s).error : null;
+  return html`<div className="space-dim">
+    <div className="space-dim__head">
+      <span className="space-dim__name text-label">${d.label}</span>
+      ${d.flag && html`<span className="text-code subtle">${d.flag}</span>`}
+      <${E.SegmentedControl} size="sm" label=${d.label} value=${s.mode} onChange=${(mode) => onChange({ mode })} options=${opts} />
+    </div>
+    ${typed && html`<${E.TextField} size="sm" hideLabel label=${d.label} mono=${d.kind === 'text'} value=${s.text}
+      onChange=${(e) => onChange({ text: e.target.value })} placeholder=${dimPlaceholder(d)} error=${error} />`}
+    <p className="field-hint text-caption">${dimCaption(d, s)}</p>
+  </div>`;
 }
 
 /* ------------------------------------------------------------------ running + results */
@@ -195,7 +251,7 @@ function RunningCard({ tune, live }) {
   const { fail } = useApp();
   const now = useNow(1000);
   const done = tune ? (tune.trials || []).length : 0;
-  const est = tune ? estimate(tune.params, tune.params.has_mtp) : 15;
+  const est = tune ? countCandidates(tune.params, { nextn_layers: tune.params.has_mtp }) : 15;
   return html`<${E.Card} title=${tune ? `Tuning ${modelLabel(tune.model)}` : 'Tuning'}
     description=${tune ? `${ctxLabel(tune.params.ctx)} context · ${tune.params.objective} · running for ${fmtDuration(now - tune.created_at)}` : ''}
     actions=${html`<${E.Button} variant="secondary" icon="x" onClick=${() => api.post('/api/tune/cancel').catch(fail)}>Cancel<//>`}>
