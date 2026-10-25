@@ -21,6 +21,15 @@ def _find_llama_server() -> str:
     return shutil.which("llama-server") or "/app/llama/llama-server"
 
 
+def _find_audiocpp_server() -> str:
+    explicit = os.environ.get("KILN_AUDIOCPP_SERVER")
+    if explicit:
+        return explicit
+    if Path("/app/audiocpp/audiocpp_server").exists():
+        return "/app/audiocpp/audiocpp_server"
+    return shutil.which("audiocpp_server") or "/app/audiocpp/audiocpp_server"
+
+
 PKG_DIR = Path(__file__).resolve().parent
 
 DATA_DIR = Path(_env("KILN_DATA_DIR", "/data"))
@@ -32,6 +41,12 @@ DB_PATH = DATA_DIR / "kiln.db"
 LOG_DIR = DATA_DIR / "logs"
 
 LLAMA_SERVER = _find_llama_server()
+# audio.cpp's server (text to speech, speech to text). It gets its own library directory so its ggml
+# never mixes with llama.cpp's.
+AUDIOCPP_SERVER = _find_audiocpp_server()
+AUDIOCPP_LIB_DIR = _env("KILN_AUDIOCPP_LIB_DIR", str(Path(AUDIOCPP_SERVER).parent))
+# Which GPU backend audio.cpp should use when a preset doesn't say ("vulkan", "cuda" or "cpu").
+BACKEND = _env("KILN_BACKEND", "vulkan")
 
 UI_HOST = _env("KILN_UI_HOST", "0.0.0.0")
 UI_PORT = int(_env("KILN_UI_PORT", "8090"))

@@ -25,7 +25,20 @@ ROLES = {
                 "and non-causal attention",
         "help": "Scores options instead of generating text, through /v1/systemone.",
     },
+    "tts": {
+        "label": "Text to speech",
+        "adds": "runs on audio.cpp (audiocpp_server), not llama-server",
+        "help": "Serves /v1/audio/speech on audio.cpp. The preset needs --family (for example kokoro_tts).",
+    },
+    "stt": {
+        "label": "Speech to text",
+        "adds": "runs on audio.cpp (audiocpp_server), not llama-server",
+        "help": "Serves /v1/audio/transcriptions on audio.cpp. The preset needs --family (for example qwen3_asr).",
+    },
 }
+
+# Roles that run on audio.cpp instead of llama-server.
+AUDIO_ROLES = {"tts", "stt"}
 
 # Paths that belong to one kind of model. Anything else goes to the model named in the request,
 # or to the default chat model.
@@ -33,6 +46,10 @@ ENDPOINT_ROLE = {
     "/v1/embeddings": "embedding", "/embeddings": "embedding", "/embedding": "embedding",
     "/v1/rerank": "rerank", "/rerank": "rerank", "/reranking": "rerank", "/v1/reranking": "rerank",
     "/v1/systemone": "decision",
+    "/v1/audio/speech": "tts", "/audio/speech": "tts",
+    "/v1/audio/transcriptions": "stt", "/audio/transcriptions": "stt",
+    "/v1/audio/transcriptions/details": "stt", "/v1/audio/alignments": "stt",
+    "/v1/audio/voices": "tts", "/v1/audio/transcriptions/live": "stt",
 }
 
 # Decision models read their whole prompt in one micro-batch, so the batch must hold the context.
@@ -69,6 +86,11 @@ def apply(role: str, model_path: str, rows: list[dict]) -> tuple[list[dict], lis
     """
     rows = [dict(r) for r in rows]
     notes: list[str] = []
+    if role in AUDIO_ROLES:
+        if _value(rows, "--family") is None:
+            raise ValueError("Add a row “--family <name>” to this preset (for example kokoro_tts or qwen3_asr) "
+                             "so audio.cpp knows which model family to load.")
+        return rows, notes
 
     def add(flag: str, value: str | None = None, why: str = "") -> None:
         rows.append({"flag": flag, "value": value})

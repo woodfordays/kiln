@@ -1,10 +1,11 @@
-# Kiln: llama.cpp + web control panel. One Dockerfile, two GPU backends:
+# Kiln: llama.cpp + audio.cpp + web control panel. One Dockerfile, two GPU backends:
 #
 #   KILN_BACKEND=vulkan   AMD (and Intel) GPUs through Mesa RADV/ANV   (default)
 #   KILN_BACKEND=cuda     NVIDIA GPUs through CUDA
 #
 #   docker compose build                      # args come from .env (scripts/setup-env.sh)
 #   docker compose build --build-arg LLAMA_CPP_REF=b11200
+#   docker compose build --build-arg AUDIO_CPP_REF=none   # leave audio.cpp out of the image
 #
 ARG KILN_BACKEND=vulkan
 ARG UBUNTU_VERSION=26.04
@@ -24,6 +25,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends git ca-certific
 RUN git clone --filter=tree:0 --no-checkout "${LLAMA_CPP_REPO}" /src \
     && cd /src && git checkout --quiet "${LLAMA_CPP_REF}" \
     && git log -1 --format='llama.cpp %h (%cd)' --date=short
+
+# ---------------------------------------------------------------- audio.cpp source
+FROM docker.io/ubuntu:${UBUNTU_VERSION} AS audiocpp-src
+ARG AUDIO_CPP_REPO=https://github.com/0xShug0/audio.cpp
+# tag v0.9.2; a tag or branch works too. `none` leaves audio.cpp out of the image.
+ARG AUDIO_CPP_REF=0097d365a00b52a6991ad7618f0a04e8d2935e47
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+RUN if [ "${AUDIO_CPP_REF}" = "none" ]; then mkdir -p /src; else \
+      git clone "${AUDIO_CPP_REPO}" /src \
+      && cd /src && git checkout --quiet "${AUDIO_CPP_REF}" \
+      && git submodule update --init --recursive --depth 1 \
+      && git log -1 --format='audio.cpp %h (%cd)' --date=short; \
+    fi
 
 # ---------------------------------------------------------------- llama.cpp's own chat UI
 FROM docker.io/node:${NODE_VERSION} AS webui
@@ -73,6 +88,57 @@ RUN mkdir -p /out \
     && cp build/bin/llama-server build/bin/llama-bench build/bin/llama-cli /out/ \
     && find build -name "*.so*" -exec cp -P {} /out/ \;
 
+# ---------------------------------------------------------------- build: audio.cpp, Vulkan
+FROM docker.io/ubuntu:${UBUNTU_VERSION} AS audiocpp-build-vulkan
+ARG AUDIO_CPP_REF
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential cmake git ca-certificates libssl-dev \
+        libvulkan-dev glslc spirv-headers \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=audiocpp-src /src /src
+WORKDIR /src
+# Same portable CPU policy as llama.cpp: all CPU variants, picked at runtime.
+RUN if [ "${AUDIO_CPP_REF}" = "none" ]; then mkdir -p /out; else \
+      cmake -B build -DCMAKE_BUILD_TYPE=Release \
+        -DAUDIOCPP_MODEL_SET=full \
+        -DENGINE_ENABLE_NATIVE_CPU=OFF -DENGINE_ENABLE_CPU_ALL_VARIANTS=ON \
+        -DENGINE_ENABLE_OPENMP=ON -DAUDIOCPP_DEPLOYMENT_BUILD=ON \
+        -DENGINE_BUILD_EXAMPLES=OFF -DENGINE_BUILD_TESTS=OFF -DENGINE_BUILD_WARMBENCH=OFF \
+        -DENGINE_ENABLE_VULKAN=ON -DENGINE_ENABLE_CUDA=OFF \
+    && cmake --build build --parallel "$(nproc)" --target audiocpp_server \
+    && mkdir -p /out \
+    && cp build/bin/audiocpp_server /out/ \
+    && find build -name "*.so*" -exec cp -P {} /out/ \; \
+    && cp -r model_specs /out/; \
+    fi
+
+# ---------------------------------------------------------------- build: audio.cpp, CUDA
+FROM docker.io/nvidia/cuda:${CUDA_VERSION}-devel-ubuntu${CUDA_UBUNTU_VERSION} AS audiocpp-build-cuda
+ARG AUDIO_CPP_REF
+# Same meaning as in build-cuda above.
+ARG CUDA_ARCHITECTURES=default
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        gcc-14 g++-14 build-essential cmake git ca-certificates libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+ENV CC=gcc-14 CXX=g++-14 CUDAHOSTCXX=g++-14
+COPY --from=audiocpp-src /src /src
+WORKDIR /src
+RUN if [ "${AUDIO_CPP_REF}" = "none" ]; then mkdir -p /out; else \
+      ARCH=""; if [ "${CUDA_ARCHITECTURES}" != "default" ]; then ARCH="-DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCHITECTURES}"; fi \
+    && cmake -B build -DCMAKE_BUILD_TYPE=Release \
+        -DAUDIOCPP_MODEL_SET=full \
+        -DENGINE_ENABLE_NATIVE_CPU=OFF -DENGINE_ENABLE_CPU_ALL_VARIANTS=ON \
+        -DENGINE_ENABLE_OPENMP=ON -DAUDIOCPP_DEPLOYMENT_BUILD=ON \
+        -DENGINE_BUILD_EXAMPLES=OFF -DENGINE_BUILD_TESTS=OFF -DENGINE_BUILD_WARMBENCH=OFF \
+        -DENGINE_ENABLE_CUDA=ON ${ARCH} \
+        -DCMAKE_EXE_LINKER_FLAGS=-Wl,--allow-shlib-undefined \
+    && cmake --build build --parallel "$(nproc)" --target audiocpp_server \
+    && mkdir -p /out \
+    && cp build/bin/audiocpp_server /out/ \
+    && find build -name "*.so*" -exec cp -P {} /out/ \; \
+    && cp -r model_specs /out/; \
+    fi
+
 # ---------------------------------------------------------------- runtime bases
 FROM docker.io/ubuntu:${UBUNTU_VERSION} AS base-vulkan
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -89,6 +155,7 @@ ENV NVIDIA_VISIBLE_DEVICES=all NVIDIA_DRIVER_CAPABILITIES=compute,utility \
     CUDA_CACHE_PATH=/data/cache/cuda
 
 FROM build-${KILN_BACKEND} AS llama
+FROM audiocpp-build-${KILN_BACKEND} AS audiocpp
 
 # ---------------------------------------------------------------- runtime
 FROM base-${KILN_BACKEND} AS runtime
@@ -97,11 +164,16 @@ COPY app/requirements.txt /app/requirements.txt
 RUN python3 -m venv /app/venv && /app/venv/bin/pip install --no-cache-dir -r /app/requirements.txt
 
 COPY --from=llama /out /app/llama
+COPY --from=audiocpp /out /app/audiocpp
 COPY app/kiln /app/kiln/kiln
 COPY web /app/web
 
+# /app/audiocpp is not on the global LD_LIBRARY_PATH: its ggml libraries would clash with llama.cpp's.
+# Kiln sets the path per process when it starts audio.cpp.
 ENV KILN_BACKEND=${KILN_BACKEND} \
     KILN_LLAMA_SERVER=/app/llama/llama-server \
+    KILN_AUDIOCPP_SERVER=/app/audiocpp/audiocpp_server \
+    KILN_AUDIOCPP_LIB_DIR=/app/audiocpp \
     LD_LIBRARY_PATH=/app/llama${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH} \
     KILN_WEB_DIR=/app/web \
     KILN_DATA_DIR=/data \
