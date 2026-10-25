@@ -265,6 +265,10 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
                 return Response(b"RIFF....WAVE", media_type="audio/wav", headers={"x-kiln-model": "tts"})
             return {"text": "hello"}
 
+        @fake.get("/v1/audio/voices")
+        async def voices(model: str = ""):
+            return {"voices": ["af_heart"], "model": model}
+
         with unittest.mock.patch.object(api.proxy, "app", fake):
             r = await self.http.post("/api/audio/speech", json={"input": "hi"})
             self.assertEqual((r.status_code, r.headers["content-type"], r.content), (200, "audio/wav", b"RIFF....WAVE"))
@@ -274,6 +278,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(seen[1][1].startswith("multipart/form-data; boundary="))
             self.assertIn(b'name="file"; filename="a.wav"', seen[1][2])
             self.assertEqual((await self.http.post("/api/audio/translations", json={})).status_code, 404)
+            self.assertEqual((await self.http.get("/api/audio/voices?model=kokoro")).json(), {"voices": ["af_heart"], "model": "kokoro"})
         self.assertEqual(seen[0][:2], ("speech", "application/json"))
 
     async def test_roles_endpoint(self):

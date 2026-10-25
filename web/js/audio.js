@@ -2,13 +2,10 @@
    serves (/v1/audio/speech, /v1/audio/transcriptions), the checks the server would make, how to read an
    answer, and the same calls as curl. No React here, so the tests can run it under node. */
 
+// what Kiln's audio.cpp backend returns (it also has "json", base64 WAV in JSON, which a player has no use for)
 export const FORMATS = [
   { value: 'wav', label: 'WAV', mime: 'audio/wav' },
-  { value: 'mp3', label: 'MP3', mime: 'audio/mpeg' },
-  { value: 'opus', label: 'Opus', mime: 'audio/ogg' },
-  { value: 'flac', label: 'FLAC', mime: 'audio/flac' },
-  { value: 'aac', label: 'AAC', mime: 'audio/aac' },
-  { value: 'pcm', label: 'PCM (raw)', mime: 'audio/pcm' },
+  { value: 'pcm', label: 'PCM (raw 16-bit)', mime: 'audio/pcm' },
 ];
 // OpenAI's names; a server that has its own voices says which ones in its error
 export const VOICES = ['alloy', 'ash', 'ballad', 'coral', 'echo', 'fable', 'nova', 'onyx', 'sage', 'shimmer'];
@@ -48,7 +45,7 @@ export function speechBody(d) {
   if (d.model) body.model = d.model;
   body.input = (d.input || '').trim();
   if ((d.voice || '').trim()) body.voice = d.voice.trim();
-  if (d.format && d.format !== 'mp3') body.response_format = d.format; // mp3 is the API's default
+  if (d.format && d.format !== 'wav') body.response_format = d.format; // wav is Kiln's default
   if (Number(d.speed) !== 1) body.speed = Math.round(Number(d.speed) * 100) / 100;
   return body;
 }
@@ -103,10 +100,8 @@ export function pcmToWav(pcm, sampleRate = 24000, channels = 1) {
 
 /* ---------------------------------------------------------------- speech to text */
 
-export const STT_FORMATS = ['json', 'verbose_json', 'text', 'srt', 'vtt'];
-
 export function defaultTranscription() {
-  return { model: '', language: '', prompt: '', format: 'verbose_json' };
+  return { model: '', language: '' };
 }
 
 /* The fields of the multipart form (Kiln routes the path to its speech-to-text model, so model may be left out) for POST /v1/audio/transcriptions, file aside, in send order. */
@@ -114,16 +109,13 @@ export function transcriptionFields(d) {
   const f = [];
   if (d.model) f.push(['model', d.model]);
   if ((d.language || '').trim()) f.push(['language', d.language.trim()]);
-  if ((d.prompt || '').trim()) f.push(['prompt', d.prompt.trim()]);
-  if (d.format && d.format !== 'json') f.push(['response_format', d.format]);
-  if (d.format === 'verbose_json') f.push(['timestamp_granularities[]', 'segment']);
   return f;
 }
 
 /* A FormData for the call. FormData and Blob are globals in browsers and in node 18+. */
 export function transcriptionForm(d, file, filename) {
   const form = new FormData();
-  form.append('file', file, filename || file.name || 'audio.wav');
+  form.append('file', file, filename || file.name || 'audio.wav'); // WAV only: see toWav16k in the page
   for (const [k, v] of transcriptionFields(d)) form.append(k, v);
   return form;
 }
@@ -149,23 +141,68 @@ function parseCues(text) {
   return segs;
 }
 
-/* Any transcription answer as { text, language, duration, segments: [{start, end, text}] }. */
+/* Any transcription answer as { text, language, duration, segments: [{start, end, text}], timing }. Kiln answers
+   {text, timing}; OpenAI-style servers may send verbose_json segments, plain text, SRT or VTT. */
 export function readTranscription(format, body) {
   if (format === 'srt' || format === 'vtt') {
     const segments = parseCues(String(body).replace(/\r/g, ''));
-    return { text: segments.map((s) => s.text).join(' '), language: null, duration: segments.length ? segments[segments.length - 1].end : null, segments };
+    return { text: segments.map((s) => s.text).join(' '), language: null, duration: segments.length ? segments[segments.length - 1].end : null, segments, timing: null };
   }
   if (typeof body === 'string') {
     let d = null;
     try { d = JSON.parse(body); } catch {}
-    if (!d || typeof d !== 'object') return { text: body.trim(), language: null, duration: null, segments: [] };
+    if (!d || typeof d !== 'object') return { text: body.trim(), language: null, duration: null, segments: [], timing: null };
     body = d;
   }
   const segments = Array.isArray(body.segments)
     ? body.segments.map((s) => ({ start: Number(s.start), end: Number(s.end), text: String(s.text || '').trim() })) : [];
   const duration = Number.isFinite(Number(body.duration)) && body.duration != null ? Number(body.duration)
     : segments.length ? segments[segments.length - 1].end : null;
-  return { text: String(body.text || '').trim(), language: body.language || null, duration, segments };
+  const timing = body.timing && typeof body.timing === 'object' ? body.timing : null;
+  return { text: String(body.text || '').trim(), language: body.language || null, duration, segments, timing };
+}
+
+/* The timing object's numbers as [label, text] rows: {"decode_ms": 812} → ["decode", "812 ms"]. */
+export function timingRows(timing) {
+  if (!timing) return [];
+  return Object.entries(timing).filter(([, v]) => typeof v === 'number' && Number.isFinite(v)).map(([k, v]) => {
+    const m = k.match(/^(.*?)_?(ms|s|sec|seconds)$/);
+    const label = (m ? m[1] : k).replace(/_/g, ' ') || k;
+    const unit = m ? (m[2] === 'ms' ? 'ms' : 's') : '';
+    return [label, unit === 'ms' ? `${Math.round(v)} ms` : unit ? `${v.toFixed(2)} s` : String(Math.round(v * 100) / 100)];
+  });
+}
+
+/* GET /v1/audio/voices answers {voices: [...]}, as names or as objects with a name or id. */
+export function voicesOf(data) {
+  const list = data && Array.isArray(data.voices) ? data.voices : Array.isArray(data) ? data : [];
+  return [...new Set(list.map((v) => (typeof v === 'string' ? v : v && (v.name || v.id || v.voice))).filter((v) => typeof v === 'string' && v))];
+}
+
+/* Kiln's speech-to-text takes WAV only. True when the first bytes are a RIFF/WAVE header. */
+export function isWav(bytes) {
+  const b = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  const tag = (o) => String.fromCharCode(b[o], b[o + 1], b[o + 2], b[o + 3]);
+  return b.length >= 12 && tag(0) === 'RIFF' && tag(8) === 'WAVE';
+}
+
+/* Channels of float samples (as AudioBuffer.getChannelData gives them) to one mono channel. */
+export function mixToMono(channels) {
+  if (channels.length === 1) return channels[0];
+  const out = new Float32Array(channels[0].length);
+  for (const ch of channels) for (let i = 0; i < out.length; i++) out[i] += ch[i] / channels.length;
+  return out;
+}
+
+/* Mono float samples in [-1, 1] to a 16-bit PCM WAV file. */
+export function encodeWav(samples, sampleRate) {
+  const pcm = new Uint8Array(samples.length * 2);
+  const v = new DataView(pcm.buffer);
+  for (let i = 0; i < samples.length; i++) {
+    const x = Math.max(-1, Math.min(1, samples[i]));
+    v.setInt16(i * 2, x < 0 ? x * 0x8000 : x * 0x7fff, true);
+  }
+  return pcmToWav(pcm, sampleRate, 1);
 }
 
 /* Word error rate of a transcript against what was said, for the round trip. Case and punctuation aside. */

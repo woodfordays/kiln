@@ -2,14 +2,15 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   FORMATS, TTS_EXAMPLES, defaultSpeech, validateSpeech, speechBody, mimeOf, extOf, speechFilename, errorMessage, pcmToWav,
-  defaultTranscription, transcriptionFields, transcriptionForm, readTranscription, fmtClock, wordErrorRate, recorderMime,
+  defaultTranscription, transcriptionFields, transcriptionForm, readTranscription, timingRows, voicesOf, isWav, mixToMono, encodeWav,
+  fmtClock, wordErrorRate, recorderMime,
   speechCurl, transcriptionCurl,
 } from '../js/audio.js';
 
 test('the default speech draft is valid and sends only what differs from the API defaults', () => {
   const d = defaultSpeech();
   assert.equal(validateSpeech(d).ok, true);
-  assert.deepEqual(speechBody(d), { input: TTS_EXAMPLES[0].text, response_format: 'wav' });
+  assert.deepEqual(speechBody(d), { input: TTS_EXAMPLES[0].text });
 });
 
 test('every example prompt is valid', () => {
@@ -17,8 +18,8 @@ test('every example prompt is valid', () => {
 });
 
 test('speech body carries model, voice, format and speed when set', () => {
-  const b = speechBody({ model: 'kokoro', input: '  Hi there  ', voice: ' nova ', format: 'mp3', speed: 1.234 });
-  assert.deepEqual(b, { model: 'kokoro', input: 'Hi there', voice: 'nova', speed: 1.23 });
+  const b = speechBody({ model: 'kokoro', input: '  Hi there  ', voice: ' nova ', format: 'pcm', speed: 1.234 });
+  assert.deepEqual(b, { model: 'kokoro', input: 'Hi there', voice: 'nova', response_format: 'pcm', speed: 1.23 });
 });
 
 test('speech validation flags empty text, long text, bad speed and format', () => {
@@ -60,31 +61,54 @@ test('raw PCM gets a playable WAV header', () => {
 });
 
 test('transcription form fields', () => {
-  assert.deepEqual(transcriptionFields(defaultTranscription()), [['response_format', 'verbose_json'], ['timestamp_granularities[]', 'segment']]);
-  assert.deepEqual(transcriptionFields({ model: 'whisper', language: ' en ', prompt: '', format: 'json' }), [['model', 'whisper'], ['language', 'en']]);
+  assert.deepEqual(transcriptionFields(defaultTranscription()), []);
+  assert.deepEqual(transcriptionFields({ model: 'whisper', language: ' en ' }), [['model', 'whisper'], ['language', 'en']]);
 });
 
 test('the transcription form carries the file under its name', async () => {
-  const form = transcriptionForm({ model: 'w', format: 'text' }, new Blob([new Uint8Array([1, 2, 3])], { type: 'audio/wav' }), 'clip.wav');
+  const form = transcriptionForm({ model: 'w', language: 'de' }, new Blob([new Uint8Array([1, 2, 3])], { type: 'audio/wav' }), 'clip.wav');
   const file = form.get('file');
   assert.equal(file.name, 'clip.wav');
   assert.equal(file.size, 3);
   assert.equal(form.get('model'), 'w');
-  assert.equal(form.get('response_format'), 'text');
+  assert.equal(form.get('language'), 'de');
 });
 
 test('transcriptions read the same whatever the format', () => {
   const verbose = readTranscription('verbose_json', JSON.stringify({ text: ' Hello world. ', language: 'english', duration: 2.5,
     segments: [{ id: 0, start: 0, end: 1.2, text: ' Hello' }, { id: 1, start: 1.2, end: 2.5, text: ' world.' }] }));
   assert.deepEqual(verbose, { text: 'Hello world.', language: 'english', duration: 2.5,
-    segments: [{ start: 0, end: 1.2, text: 'Hello' }, { start: 1.2, end: 2.5, text: 'world.' }] });
-  assert.deepEqual(readTranscription('json', { text: 'Hi' }), { text: 'Hi', language: null, duration: null, segments: [] });
+    segments: [{ start: 0, end: 1.2, text: 'Hello' }, { start: 1.2, end: 2.5, text: 'world.' }], timing: null });
+  assert.deepEqual(readTranscription('json', { text: 'Hi', timing: { total_ms: 40 } }),
+    { text: 'Hi', language: null, duration: null, segments: [], timing: { total_ms: 40 } });
   assert.equal(readTranscription('text', 'Just text\n').text, 'Just text');
   const srt = readTranscription('srt', '1\n00:00:00,000 --> 00:00:01,500\nHello\n\n2\n00:00:01,500 --> 00:00:03,000\nthere\nfriend\n');
   assert.equal(srt.text, 'Hello there friend');
   assert.equal(srt.duration, 3);
   const vtt = readTranscription('vtt', 'WEBVTT\n\n00:00.000 --> 00:02.250\nOne cue\n');
   assert.deepEqual(vtt.segments, [{ start: 0, end: 2.25, text: 'One cue' }]);
+});
+
+test('timing rows read units from the key', () => {
+  assert.deepEqual(timingRows({ decode_ms: 812.4, audio_seconds: 2.5, rtf: 0.123, note: 'x' }),
+    [['decode', '812 ms'], ['audio', '2.50 s'], ['rtf', '0.12']]);
+  assert.deepEqual(timingRows(null), []);
+});
+
+test('voices come as names or objects', () => {
+  assert.deepEqual(voicesOf({ voices: ['af_heart', { name: 'am_adam' }, { id: 'bf_emma' }, 'af_heart', null] }), ['af_heart', 'am_adam', 'bf_emma']);
+  assert.deepEqual(voicesOf(null), []);
+});
+
+test('float samples encode to a WAV that is recognised as one', () => {
+  const mono = mixToMono([new Float32Array([1, -1, 0]), new Float32Array([1, 1, 0])]);
+  assert.deepEqual([...mono], [1, 0, 0]);
+  const wav = encodeWav(new Float32Array([0, 1, -1, 2]), 16000);
+  assert.equal(isWav(wav), true);
+  assert.equal(isWav(new Uint8Array([0x1a, 0x45, 0xdf, 0xa3])), false);
+  const v = new DataView(wav.buffer);
+  assert.deepEqual([v.getInt16(44, true), v.getInt16(46, true), v.getInt16(48, true), v.getInt16(50, true)], [0, 32767, -32768, 32767]);
+  assert.equal(v.getUint32(24, true), 16000);
 });
 
 test('clock times', () => {
@@ -109,6 +133,6 @@ test('the recorder picks the first type the browser supports', () => {
 test('curl snippets', () => {
   assert.equal(speechCurl('http://h:8080', { input: "it's" }, 'wav'),
     `curl http://h:8080/v1/audio/speech \\\n  -H 'Content-Type: application/json' \\\n  -d '{\n  "input": "it'\\''s"\n}' \\\n  -o speech.wav`);
-  assert.equal(transcriptionCurl('http://h:8080', { model: 'w', format: 'json' }),
+  assert.equal(transcriptionCurl('http://h:8080', { model: 'w' }),
     "curl http://h:8080/v1/audio/transcriptions \\\n  -F file=@'speech.wav' \\\n  -F 'model=w'");
 });
