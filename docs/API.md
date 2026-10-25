@@ -9,8 +9,9 @@ FastAPI also serves a generated schema at `/api/openapi.json` and an explorer at
 They list every route and body field. This page adds what the schema can't: semantics,
 states, errors and how the pieces fit.
 
-The OpenAI-compatible inference API is a different port (`:8080`, `/v1/...`) and is not covered
-here. It is llama-server's own API behind Kiln's recording proxy.
+The OpenAI-compatible inference API is a different port (`:8080`, `/v1/...`). It is llama-server's
+own API behind Kiln's recording proxy and is not covered here, except for the
+[audio endpoints](#audio-endpoints), which Kiln serves from audio.cpp and whose routing it defines.
 
 ## Contents
 
@@ -20,6 +21,7 @@ here. It is llama-server's own API behind Kiln's recording proxy.
 - [Quick actions](#quick-actions): `GET /api/quick`, run a preset, stop, restart
 - [Live events](#live-events): `GET /api/events` (server-sent events)
 - [Building the Zen extension](#building-the-zen-extension): manifest, flows, sample code
+- [Audio endpoints](#audio-endpoints): text to speech and speech to text on the API port
 - [Endpoint reference](#endpoint-reference): every route
 
 ## Conventions
@@ -344,6 +346,122 @@ suspended, which closes an open `EventSource`. Either reconnect in `runtime.onSt
 popup open, or poll `/api/quick` with `browser.alarms` (once a minute) and notify on `tune.running`
 going from `true` to `false` or `state` turning `crashed`.
 
+## Audio endpoints
+
+Text to speech and speech to text run on [audio.cpp](https://github.com/0xShug0/audio.cpp)'s
+`audiocpp_server`, one process per running preset with the role `tts` or `stt` (see
+[Running several models → Speech models](MULTI-MODEL.md#speech-models-audiocpp)). They are served on the
+**API port** (`http://<host>:<KILN_API_PORT>`, default `8080`), next to the chat endpoints, not under
+`/api` on the control port. The shapes are OpenAI's: a client written for OpenAI's audio API works
+against Kiln without changes. Kiln picks the model and passes everything else through to audio.cpp,
+so audio.cpp's own extra fields (listed in its
+[API reference](https://github.com/0xShug0/audio.cpp/blob/main/app/server/api.md)) work too.
+
+| Method | Path | Role | Request | Response |
+|---|---|---|---|---|
+| POST | `/v1/audio/speech` (also `/audio/speech`) | `tts` | JSON | `audio/wav` bytes, or JSON or SSE when asked |
+| POST | `/v1/audio/transcriptions` (also `/audio/transcriptions`) | `stt` | `multipart/form-data`, or JSON | `{text, timing}`, or SSE with `stream=true` |
+| POST | `/v1/audio/transcriptions/details` | `stt` | Same as transcriptions | `{text, timing}` plus `language`, `segments`, `speaker_turns`, `words`, `sample_rate` when the model produces them |
+| POST | `/v1/audio/alignments` | `stt` | `multipart/form-data`: `file`, `model`, `text`, `language` | Word timestamps |
+| GET | `/v1/audio/voices` | `tts` | `?model=` | `{voices: [names]}` |
+| OPTIONS | `/v1/audio/*`, `/audio/*` | | CORS preflight | `204`, any origin allowed |
+
+Every response carries `X-Kiln-Model: <name>`, the model that answered, and
+`Access-Control-Allow-Origin: *`, so a web page on another origin can call these paths, as it can
+call llama-server's.
+
+### `POST /v1/audio/speech`
+
+```json
+{
+  "model": "kokoro",
+  "input": "The kiln is up to temperature.",
+  "voice": "af_heart",
+  "speed": 1.0,
+  "response_format": "wav"
+}
+```
+
+| Field | | Meaning |
+|---|---|---|
+| `model` | optional | Which model speaks. See [picking a model](#picking-a-model). |
+| `input` | required | The text to speak. |
+| `voice` | optional | A voice the model has: a built-in voice id, a preset voice from `--voice`, or a file in the voice directory. Without it, the preset's `--voice` is used, else the model's default. `GET /v1/audio/voices` lists the names audio.cpp can find. |
+| `speed` | optional | Speaking-rate multiplier, for models that support one. Other models accept only `1`. |
+| `response_format` | optional | `wav` (default): the response body is the WAV file, `Content-Type: audio/wav`. `json`: `{"audio": "<base64 WAV>", …}`. `pcm`: raw 16-bit PCM, for streaming. `mp3` needs an audio.cpp build with its MP3 frontend, which Kiln's image doesn't include. |
+| `stream_format` | optional | For a preset with `--mode streaming`: `sse` sends `speech.audio.delta` events (base64 PCM), then `speech.audio.done`, then `data: [DONE]`; `audio` with `response_format: "pcm"` streams raw PCM. |
+| `options`, `instructions`, `seed`, `max_tokens`, `voice_ref`, `reference_text` | optional | Passed to audio.cpp as they are (model-specific controls, voice cloning). |
+
+```bash
+curl http://localhost:8080/v1/audio/speech -H 'Content-Type: application/json' \
+  -d '{"model": "kokoro", "input": "Hello from Kiln."}' -o hello.wav
+```
+
+### `POST /v1/audio/transcriptions`
+
+A `multipart/form-data` upload, as with OpenAI's Whisper endpoint:
+
+| Field | | Meaning |
+|---|---|---|
+| `file` | required | The recording, as a **WAV** file. Kiln's audio.cpp build has no MP3/FLAC decoder, and a browser's `MediaRecorder` output (WebM/Opus) must be converted to WAV first. Some models want mono 16 kHz. |
+| `model` | optional | Which model listens. See [picking a model](#picking-a-model). |
+| `language` | optional | A language hint, in the form the model expects (`en`, `English`). |
+| `stream` | optional | `true`, for a preset with `--mode streaming`: SSE `transcript.text.delta` events, one `transcript.text.done` with the whole text, then `data: [DONE]`. |
+| `prompt` | optional | Recognition context (names, spellings), for models that take it. |
+
+```bash
+curl http://localhost:8080/v1/audio/transcriptions -F model=whisper-1 -F language=en -F file=@note.wav
+```
+
+```json
+{"text": "Turn the kiln down to nine hundred degrees.", "timing": {"wall_ms": 412.7, "audio_duration_ms": 2400.0, "rtf": 0.17}}
+```
+
+The JSON form, `{"model": "...", "audio": "/models/clips/note.wav"}`, names a file **inside the
+container**, so it only suits files under `/models`. audio.cpp documents one response shape, the JSON
+above, and no OpenAI `response_format` values (`text`, `srt`, `verbose_json`); use `/details` for
+timestamps.
+
+`/v1/audio/transcriptions/live` (raw PCM in, SSE out) is passed through too, but Kiln reads the whole
+request body before forwarding it, so through Kiln it isn't live: the transcript starts after the upload ends.
+
+### Picking a model
+
+1. **By name.** The name comes from the `X-Kiln-Model` header, `?model=`, the JSON body's `model`, or
+   the multipart `model` field, in that order. It is matched like any other request
+   ([Running several models](MULTI-MODEL.md#routing-fit-and-swapping)): a running model's API name (the
+   preset's alias, else its name), the preset name, its slug, then the model file's name.
+2. **By endpoint.** A name that matches nothing, such as OpenAI's `tts-1` or `whisper-1`, or no name at all,
+   goes to the running model with the endpoint's role (`tts` for speech and voices, `stt` for
+   transcriptions and alignments), the one used last if there are several.
+3. **Swap on request.** With *Load models when a request names them* on (Settings), a request whose
+   model isn't running loads it: the preset it names, or, with no matching name, the `tts` or `stt`
+   preset started most recently. The request waits for the load like a chat request does.
+   `GET /v1/audio/voices` never loads a model.
+4. **Nothing to answer.** Unlike embeddings, audio requests never fall through to the chat model. With no
+   model of that role running or loadable the answer is `503`:
+
+```json
+{"error": {"code": 503, "type": "unavailable_error", "message": "No text-to-speech model is loaded."}}
+```
+
+audio.cpp only knows a model by the id in the config Kiln wrote for it, which is the preset's API name.
+Kiln rewrites the `model` it forwards (JSON field, multipart field and query parameter) to that id, so
+clients can use any of the names above.
+
+`GET /v1/models` lists audio models with the rest, with `kiln.role` set to `tts` or `stt`.
+
+### Errors and stats
+
+- Kiln's own errors (no model, a load that failed, the tuner holding the GPU) are `{"error": {"code",
+  "type", "message"}}` with `503`, as on the chat endpoints.
+- audio.cpp's errors pass through unchanged: `400` for a request the model rejects (unknown voice,
+  an option the family doesn't take, a file that isn't WAV), `503` with `server_busy` when the model is
+  still working on another request.
+- Each speech, transcription and alignment request is recorded on the Requests page and in `/metrics`
+  with its status, total time and time to first byte. Token counts and speeds stay empty: audio models
+  don't report them.
+
 ## Endpoint reference
 
 All routes on the control port. "Body" lists the JSON fields. Optional ones show their default.
@@ -354,7 +472,7 @@ All routes on the control port. "Body" lists the JSON fields. Optional ones show
 |---|---|---|---|
 | GET | `/healthz` | | `{ok, server}`. No auth. |
 | GET | `/metrics` | | Prometheus text format: request counters, the GPU, running models and llama-server's own metrics ([METRICS.md](METRICS.md)) |
-| GET | `/api/status` | | Fleet status (the primary model's fields plus `instances`, `vram`) and `llama` (version, binary, devices), `backend`, `gpu` (availability and last sample), `auth`, `server_time` |
+| GET | `/api/status` | | Fleet status (the primary model's fields plus `instances`, each with `role` and `engine`: `llama` or `audiocpp`, and `vram`) and `llama` (version, binary, devices), `backend`, `gpu` (availability and last sample), `auth`, `server_time` |
 | GET | `/api/quick` | | [Quick snapshot](#get-apiquick) |
 | POST | `/api/server/start` | `preset_id` or `model`+`flags`+`env`; `role`, `replace` (`true`, run ids or `"auto"`), `force=false` | Status and `started` ([details](#run-a-preset-post-apiserverstart)) |
 | POST | `/api/server/plan` | Same as start | `{fits, need_mib, free_mib, reason, evict, evictable, …}`: does it fit, and what stopping would free |
@@ -362,7 +480,7 @@ All routes on the control port. "Body" lists the JSON fields. Optional ones show
 | POST | `/api/server/restart` | `run_id` (none = the primary model) | Status |
 | POST | `/api/server/dismiss` | `run_id` | Status. Forgets a crashed model. |
 | GET | `/api/server/logs` | `?tail=1000&run_id=` | `{run_id, lines: [[ts, text, source]]}` for one model (default: the primary one) |
-| GET | `/api/roles` | | Roles (`chat`, `embedding`, `rerank`, `decision`), the flags each adds, help text |
+| GET | `/api/roles` | | Roles (`chat`, `embedding`, `rerank`, `decision`, `tts`, `stt`), the flags each adds, help text |
 | POST | `/api/decide` | A `/v1/systemone` body | The decision model's answer, status and `X-Kiln-Model` header exactly as the API port gives them (errors are `{"error": {…}}`, not `{"detail"}`). The UI's call builder uses it: it goes through the API port's routing and swapping and is recorded with the client `kiln-ui`. |
 | GET | `/api/runs` | `?limit=50` | Run history: preset, model, argv, env, start/ready/stop times, exit code, error |
 | GET | `/api/runs/{id}/log` | | The run's full log as a text file |

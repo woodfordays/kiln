@@ -255,7 +255,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_roles_endpoint(self):
         roles = (await self.http.get("/api/roles")).json()
-        self.assertEqual(set(roles), {"chat", "embedding", "rerank", "decision"})
+        self.assertEqual(set(roles), {"chat", "embedding", "rerank", "decision", "tts", "stt"})
         self.assertIn("--embeddings", roles["embedding"]["adds"])
 
 

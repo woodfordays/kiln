@@ -9,6 +9,7 @@ services:
       args:
         KILN_BACKEND: ${KILN_BACKEND:-vulkan}
         LLAMA_CPP_REF: ${LLAMA_CPP_REF:-ff0dbb975e93a9a2899efa34bdd32d1c5cfbc183}
+        AUDIO_CPP_REF: ${AUDIO_CPP_REF:-0097d365a00b52a6991ad7618f0a04e8d2935e47}
         CUDA_VERSION: ${CUDA_VERSION:-12.8.1}
         CUDA_ARCHITECTURES: ${CUDA_ARCHITECTURES:-default}
     image: kiln:${KILN_BACKEND:-vulkan}

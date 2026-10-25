@@ -13,7 +13,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from starlette.background import BackgroundTask
 
-from . import config, db, decider, events, gpu, metrics
+from . import config, db, decider, events, gpu, metrics, multipart
 from .route import resolve
 from .server import NoFit, get_preset, manager
 
@@ -22,7 +22,10 @@ TRACKED = {
     "/v1/messages", "/infill", "/v1/responses", "/responses",
     "/v1/embeddings", "/embeddings", "/embedding", "/v1/rerank", "/rerank", "/reranking", "/v1/reranking",
     "/v1/systemone",
+    "/v1/audio/speech", "/audio/speech", "/v1/audio/transcriptions", "/audio/transcriptions",
+    "/v1/audio/transcriptions/details", "/v1/audio/alignments",
 }
+AUDIO_QUERY = {"/v1/audio/voices", "/v1/audio/transcriptions/live"}  # audio.cpp takes the model as a query parameter here
 HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailers",
        "transfer-encoding", "upgrade", "host", "content-length"}
 MAX_JSON = 16 << 20
@@ -65,7 +68,12 @@ def _model_name(request: Request, body: bytes) -> str | None:
     named = request.headers.get("x-kiln-model") or request.query_params.get("model")
     if named:
         return named
-    if request.method != "POST" or not body or body[:1] != b"{":
+    if request.method != "POST" or not body:
+        return None
+    ctype = request.headers.get("content-type", "")
+    if "multipart/" in ctype.lower():
+        return multipart.field(body, ctype, "model") or None
+    if body[:1] != b"{":
         return None
     if len(body) <= PARSE_LIMIT:
         try:
@@ -153,6 +161,7 @@ class Recorder:
         self.swap_ms = swap_ms
         self._buf = b""
         self._json = bytearray()
+        self.keep = True  # False for bodies that are neither JSON nor SSE (audio)
         self.run_id, self.preset, self.model = inst.run_id, inst.preset, inst.model_name
         try:
             body = json.loads(req_body) if req_body else {}
@@ -201,12 +210,14 @@ class Recorder:
 
     def start(self, content_type: str) -> None:
         self.sse = "text/event-stream" in content_type
+        ct = content_type.lower()
+        self.keep = not ct or self.sse or "json" in ct or ct.startswith("text/")
 
     def feed(self, chunk: bytes) -> None:
         if self.ttfb_ms is None:
             self.ttfb_ms = self._elapsed()
         if not self.sse:
-            if len(self._json) < MAX_JSON:
+            if self.keep and len(self._json) < MAX_JSON:
                 self._json.extend(chunk)
             return
         self._buf += chunk
@@ -381,11 +392,32 @@ async def _decide(request: Request, inst, body: bytes, swap_ms: float) -> Respon
 
 # ---------------------------------------------------------------- the passthrough
 
+def _audio_model(ctype: str, body: bytes, name: str) -> bytes:
+    """The body with its `model` set to the id audio.cpp knows the model by."""
+    if not body:
+        return body
+    if "multipart/" in ctype.lower():
+        return multipart.set_field(body, ctype, "model", name)
+    if body[:1] == b"{":
+        try:
+            obj = json.loads(body)
+        except ValueError:
+            return body
+        if isinstance(obj, dict):
+            obj["model"] = name
+            return json.dumps(obj).encode()
+    return body
+
+
 async def _forward(request: Request, url_path: str, body: bytes, inst, tracked: bool, swap_ms: float) -> Response:
     headers = {k: v for k, v in request.headers.items() if k.lower() not in HOP and k.lower() != "x-kiln-model"}
     if tracked:
         headers.pop("accept-encoding", None)
     params = [(k, v) for k, v in request.query_params.multi_items() if k != "model"]  # ?model= only picks the route
+    if getattr(inst, "engine", "llama") == "audiocpp":  # its config id is our name for it, whatever the client called it
+        if url_path in AUDIO_QUERY or "model" in request.query_params:
+            params.append(("model", inst.name))
+        body = _audio_model(request.headers.get("content-type", ""), body, inst.name)
     upstream = _client.build_request(request.method, inst.url + url_path, params=params, headers=headers, content=body)
     rec = Recorder(url_path, body, request.client.host if request.client else "", inst, swap_ms) if tracked else None
     inst.begin(touch=tracked)  # /health, /props and the like don't count as use
@@ -407,6 +439,9 @@ async def _forward(request: Request, url_path: str, body: bytes, inst, tracked: 
 
     out_headers = {k: v for k, v in resp.headers.items() if k.lower() not in HOP}
     out_headers["X-Kiln-Model"] = inst.name
+    if getattr(inst, "engine", "llama") == "audiocpp":
+        out_headers.setdefault("access-control-allow-origin", "*")  # audio.cpp leaves CORS off; llama-server allows any origin
+        out_headers.setdefault("access-control-expose-headers", "X-Kiln-Model")
     if rec:
         rec.start(resp.headers.get("content-type", ""))
 
@@ -466,9 +501,20 @@ async def _waiting_stream(request: Request, route, url_path: str, body: bytes, t
     return StreamingResponse(gen(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
+def _preflight(request: Request) -> Response:
+    """CORS preflight for the audio paths, answered the way llama-server answers its own (audio.cpp doesn't)."""
+    return Response(status_code=204, headers={
+        **CORS, "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+        "Access-Control-Allow-Headers": request.headers.get("access-control-request-headers") or "*",
+        "Access-Control-Max-Age": "600",
+    })
+
+
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"])
 async def proxy(request: Request, path: str):
     url_path = "/" + path
+    if request.method == "OPTIONS" and url_path.startswith(("/v1/audio/", "/audio/")):
+        return _preflight(request)
     if manager.blocked:
         return _offline(request)
     body = await request.body()

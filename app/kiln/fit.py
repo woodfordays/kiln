@@ -12,7 +12,7 @@ import math
 import re
 from pathlib import Path
 
-from . import db, gpu, models
+from . import config, db, gpu, models, roles
 
 MIB = 1 << 20
 MARGIN_MIB = 512  # left free after loading: other processes, the desktop, the driver
@@ -57,7 +57,10 @@ def _kv_bytes(name: str | None) -> float:
 
 
 def file_size(path: str) -> int:
+    """Bytes in a model file, all its shards, or every file under a package directory."""
     try:
+        if Path(path).is_dir():
+            return sum(f.stat().st_size for f in Path(path).rglob("*") if f.is_file())
         return sum(f.stat().st_size for f in models.files_for(path))
     except OSError:
         return 0
@@ -69,8 +72,24 @@ def signature(model: str, rows: list[dict], role: str) -> str:
     return hashlib.sha1(json.dumps([model, live, role]).encode()).hexdigest()[:16]
 
 
-def estimate(model: str, rows: list[dict]) -> dict:
+def estimate_audio(model: str, rows: list[dict]) -> dict:
+    """The same figures for an audio.cpp model: the files plus a fifth for activations, on the GPU unless --backend cpu."""
+    backend = next((str(r.get("value") or "") for r in rows
+                    if (r.get("flag") or "").strip() == "--backend" and r.get("enabled") is not False and r.get("value")),
+                   config.BACKEND)
+    size = file_size(model) * 1.2
+    on_gpu = backend.lower() != "cpu"
+    return {
+        "gpu_mib": round(size / MIB + PROCESS_MIB) if on_gpu else 0, "ram_mib": 0 if on_gpu else round(size / MIB),
+        "adaptive": False, "context": 0,
+        "parts": {"weights": round(size / MIB) if on_gpu else 0, "kv": 0, "compute": 0, "projector": 0},
+    }
+
+
+def estimate(model: str, rows: list[dict], role: str = "chat") -> dict:
     """MiB the model will want on the GPU (and in RAM) with these flags. All figures are estimates."""
+    if role in roles.AUDIO_ROLES:
+        return estimate_audio(model, rows)
     meta = models.info(model)
     eff = effective(rows)
     size = file_size(model)
@@ -183,7 +202,7 @@ def measured_mib(sig: str) -> int | None:
 def check(model: str, rows: list[dict], role: str, reclaim_mib: int = 0, reserved_mib: int = 0) -> dict:
     """Would this launch fit, counting `reclaim_mib` freed by models that would be stopped first and
     setting aside `reserved_mib` that models still loading have yet to take?"""
-    est = estimate(model, rows)
+    est = estimate(model, rows, role)
     sig = signature(model, rows, role)
     measured = measured_mib(sig)
     need = measured if measured is not None else est["gpu_mib"]
