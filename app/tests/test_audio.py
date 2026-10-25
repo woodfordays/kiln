@@ -290,6 +290,21 @@ class AudioProxyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(r.status_code, 200, r.text)
         self.assertEqual(r.json(), {"voices": ["alba", "cosette"]})
 
+    async def test_the_audio_page_reaches_audiocpp(self):
+        """The Audio page calls /api/audio/* on the control port; those go through the proxy to audio.cpp."""
+        from kiln import api
+        await self.up("Kokoro", role="tts", alias="kok", flags=FAMILY)
+        await self.up("Whisper", role="stt", alias="asr", flags=ASR)
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=api.app), base_url="http://kiln", timeout=60) as ui:
+            r = await ui.post("/api/audio/speech", json={"input": "hello", "voice": "alba"})
+            self.assertEqual((r.status_code, r.headers["content-type"], r.headers["x-kiln-model"]), (200, "audio/wav", "kok"))
+            self.assertEqual(r.content[:4], b"RIFF")
+            r = await ui.post("/api/audio/transcriptions", files={"file": ("a.wav", r.content, "audio/wav")})
+            self.assertEqual(r.status_code, 200, r.text)
+            self.assertEqual((r.json()["text"], r.headers["x-kiln-model"]), (f"heard {44 + 10} bytes", "asr"))
+            r = await ui.get("/api/audio/voices")
+            self.assertEqual(r.json(), {"voices": ["alba", "cosette"]})
+
     async def test_preflight_is_answered_by_kiln(self):
         r = await self.http.options("/v1/audio/speech", headers={
             "Origin": "http://x", "Access-Control-Request-Method": "POST",
