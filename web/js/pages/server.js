@@ -4,6 +4,13 @@ import {
   fmtInt, fmtDuration, fmtMs, fmtWhen, isNum, StateBadge, RoleBadge, liveOf, crashedOf, fmtMiB, copyText, shellQuote, modelLabel,
 } from '../lib.js';
 
+// llama-server's chat page, served by Kiln under chat/<model>/. Relative, so it keeps the scheme, host
+// and path prefix of the page it opens from (an HTTPS reverse proxy has no :8080 to go to).
+function chatHref(inst) {
+  const slug = inst ? inst.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') : '';
+  return slug ? `chat/${encodeURIComponent(slug)}/` : 'chat/';
+}
+
 export function ServerPage() {
   const { status, toast, fail, refreshStatus } = useApp();
   const presets = useFetch('/api/presets');
@@ -31,7 +38,7 @@ export function ServerPage() {
         <p className="text-body">${all.length > 1 ? 'Each model runs in its own llama-server. ' : ''}Requests to <span className="mono">${location.hostname}:${status.api_port}</span> go to the model named in the request.</p>
       </div>
       <div className="page-head__actions">
-        ${ready.length > 0 && html`<${E.Button} variant="secondary" icon="external-link" onClick=${() => window.open(`${location.protocol}//${location.hostname}:${status.api_port}/`, '_blank', 'noopener')}>Open llama.cpp chat<//>`}
+        ${ready.length > 0 && html`<${E.Button} variant="secondary" icon="external-link" onClick=${() => window.open(chatHref(sel && sel.state === 'ready' ? sel : null), '_blank', 'noopener')}>Open llama.cpp chat<//>`}
         ${live.length > 0 && html`<${E.Button} variant="secondary" icon="pause" disabled=${busy} onClick=${() => act(() => api.post('/api/server/stop'), live.length > 1 ? 'All models stopped' : 'llama-server stopped')}>${live.length > 1 ? 'Stop all' : 'Stop'}<//>`}
       </div>
     </header>

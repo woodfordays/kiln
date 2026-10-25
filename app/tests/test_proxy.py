@@ -276,3 +276,62 @@ class ProxyTests(unittest.IsolatedAsyncioTestCase):
         r = await self.chat("alpha")
         self.assertEqual(r.status_code, 200, r.text)
         self.assertEqual([i.name for i in manager.live()], ["alpha"])
+
+
+class ChatPageTests(unittest.IsolatedAsyncioTestCase):
+    """llama-server's chat page, served same-origin on Kiln's UI port under /chat/<model>/."""
+
+    asyncTearDown, up, rows = ProxyTests.asyncTearDown, ProxyTests.up, ProxyTests.rows
+
+    async def asyncSetUp(self):
+        await ProxyTests.asyncSetUp(self)
+        self.ui = httpx.AsyncClient(transport=httpx.ASGITransport(app=api.app), base_url="https://kiln.example")
+        self.addAsyncCleanup(self.ui.aclose)
+
+    async def get(self, path, **kw):
+        return await self.ui.get(path, headers={"accept": "text/html"}, **kw)
+
+    async def test_redirects_are_relative_so_they_keep_the_scheme_host_and_prefix(self):
+        await self.up("alpha")
+        r = await self.get("/chat")
+        self.assertEqual((r.status_code, r.headers["location"]), (307, "chat/"))
+        r = await self.get("/chat/")
+        self.assertEqual((r.status_code, r.headers["location"]), (307, "./alpha/"))
+        r = await self.get("/chat/alpha")
+        self.assertEqual((r.status_code, r.headers["location"]), (307, "alpha/"))
+        self.assertNotIn("8080", r.headers["location"])
+
+    async def test_the_page_and_its_assets_come_from_the_named_model(self):
+        await self.up("alpha"), await self.up("Beta Two")
+        r = await self.get("/chat/beta-two/")
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertIn('src="./_app/app.js"', r.text)
+        self.assertEqual(r.headers["x-kiln-model"], "Beta Two")
+        r = await self.get("/chat/beta-two/_app/app.css")
+        self.assertEqual((r.status_code, r.headers["content-type"]), (200, "text/css"))
+        r = await self.get("/chat/beta-two/props")
+        self.assertEqual(r.json()["model_alias"], "Beta Two")
+
+    async def test_chat_streams_through_and_is_recorded(self):
+        await self.up("alpha"), await self.up("beta")
+        body = {"stream": True, "messages": [{"role": "user", "content": "hi"}]}
+        chunks = []
+        async with self.ui.stream("POST", "/chat/beta/v1/chat/completions", json=body) as r:
+            self.assertEqual(r.status_code, 200)
+            self.assertTrue(r.headers["content-type"].startswith("text/event-stream"))
+            async for chunk in r.aiter_text():
+                chunks.append(chunk)
+        text = "".join(chunks)
+        self.assertIn('"content": "hi"', text)
+        self.assertTrue(text.rstrip().endswith("data: [DONE]"))
+        rows = self.rows()
+        self.assertEqual([(x["model"], x["endpoint"], x["stream"]) for x in rows], [("beta", "/v1/chat/completions", 1)])
+
+    async def test_offline_pages_link_back_to_kiln_relatively(self):
+        r = await self.get("/chat/")
+        self.assertEqual(r.status_code, 503)
+        self.assertIn('href="../"', r.text)
+        r = await self.get("/chat/alpha/index.html")
+        self.assertEqual(r.status_code, 503)
+        self.assertIn('href="../../"', r.text)
+        self.assertNotIn(":8090", r.text)

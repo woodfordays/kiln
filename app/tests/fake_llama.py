@@ -84,6 +84,30 @@ def completion_timings(n_predict: int, n_prompt: int) -> dict:
         accepted = round(drafted * max(0.1, 0.9 - 0.04 * n))
     return {"prompt_n": n_prompt, "prompt_per_second": prefill, "predicted_n": n_predict, "predicted_per_second": decode,
             "draft_n": drafted, "draft_n_accepted": accepted}
+# A stand-in for the built-in chat page: like the real one, it only uses relative URLs.
+UI_HTML = b"""<!doctype html><meta charset="utf-8"><title>llama.cpp - chat</title>
+<link rel="stylesheet" href="./_app/app.css"><div id="model"></div><div id="reply"></div>
+<script type="module" src="./_app/app.js"></script>"""
+UI_CSS = b"body{font:14px sans-serif}"
+UI_JS = b"""const props = await (await fetch('./props')).json();
+document.getElementById('model').textContent = props.model_alias;
+const r = await fetch('./v1/chat/completions', {method: 'POST', headers: {'content-type': 'application/json'},
+  body: JSON.stringify({stream: true, messages: [{role: 'user', content: 'hello'}]})});
+const reader = r.body.getReader(), dec = new TextDecoder();
+let text = '', buf = '';
+for (;;) {
+  const {done, value} = await reader.read();
+  if (done) break;
+  buf += dec.decode(value, {stream: true});
+  const lines = buf.split('\\n'); buf = lines.pop();
+  for (const l of lines) if (l.startsWith('data: {')) text += JSON.parse(l.slice(6)).choices[0].delta.content || '';
+}
+document.getElementById('reply').textContent = text;
+document.body.dataset.done = '1';
+"""
+UI = {"/": (UI_HTML, "text/html; charset=utf-8"), "/index.html": (UI_HTML, "text/html; charset=utf-8"),
+      "/_app/app.css": (UI_CSS, "text/css"), "/_app/app.js": (UI_JS, "text/javascript")}
+
 if "crash" in MODEL:
     time.sleep(0.2)
     print("error: failed to load model (out of memory)", flush=True)
@@ -125,6 +149,8 @@ class H(BaseHTTPRequestHandler):
                     "# TYPE llamacpp:requests_processing gauge\n"
                     "llamacpp:requests_processing 0\n")
             return self._send(200, text.encode(), "text/plain; version=0.0.4")
+        if self.path.split("?")[0] in UI:
+            return self._send(200, *UI[self.path.split("?")[0]])
         if self.path.startswith("/v1/models"):
             return self._send(200, {"object": "list", "data": [{"id": ALIAS, "object": "model", "created": 1, "owned_by": "llamacpp"}]})
         return self._send(404, {"error": {"message": "not found"}})
