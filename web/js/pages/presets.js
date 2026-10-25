@@ -3,6 +3,7 @@ import {
   html, E, useState, useEffect, useMemo, useRef, api, useApp, useFetch, useEvent, useNow,
   fmtWhen, fmtBytes, copyText, commandLine, modelLabel, RoleBadge, ROLE_LABEL, liveOf, fmtMiB,
 } from '../lib.js';
+import { PreviewBreakdown } from '../memviz.js';
 import { chipsFor, toggleChip, readFeatures, setVision, setSpec, setKvUnified, kvUnifiedNote, DRAFT_LABEL } from '../features.js';
 
 let flagMetaPromise = null;
@@ -292,6 +293,12 @@ export function PresetEditor({ preset, onClose, onSaved }) {
         <${E.Button} variant="secondary" size="sm" icon="plus" onClick=${() => addFlag('')}>Add flag<//>
         ${QUICK.filter((f) => !isPresent(f) && (!meta || meta.byName[f])).map((f) => html`<${E.Button} key=${f} variant="ghost" size="sm" onClick=${() => addFlag(f)}><span className="mono">${f}</span><//>`)}
       </div>
+
+      ${model && html`<div className="stack">
+        <hr className="divider" />
+        <h3 className="section-title text-subtitle">Memory</h3>
+        <${PreviewBreakdown} model=${model} rows=${rows} presetId=${preset.id != null ? preset.id : null} />
+      </div>`}
 
       <hr className="divider" />
       <div>

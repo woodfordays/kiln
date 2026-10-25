@@ -181,6 +181,47 @@ async def server_plan(body: StartBody):
     return manager.plan(a["model"], a["rows"], a["preset"], a["role"], a["replace"])
 
 
+@app.post("/api/fit/breakdown")
+async def fit_breakdown(body: StartBody):
+    """Estimated memory segments for a launch; unsaved flags in the body win over a preset's."""
+    a = _launch_args(body)
+    if not a["model"]:
+        raise ValueError("Pick a model first.")
+    return fit.breakdown(a["model"], body.flags or a["rows"])
+
+
+@app.get("/api/server/breakdown")
+async def server_breakdown(run_id: int | None = None):
+    """The memory breakdown of a running server (the primary one without run_id), with what llama.cpp allocated."""
+    inst = manager.get(run_id) if run_id is not None else manager.primary()
+    if not inst:
+        raise LookupError("No server is running.")
+    return {**fit.breakdown(inst.model_path, inst.rows, inst.buffers, inst.gpu_mib),
+            "run_id": inst.run_id, "name": inst.name, "state": inst.state}
+
+
+@app.get("/api/server/slots")
+async def server_slots():
+    """Context use per slot of every ready server, read from each llama-server's /slots."""
+    async def one(inst):
+        out = {"run_id": inst.run_id, "name": inst.name, "state": inst.state, "n_ctx": inst.props.get("n_ctx"), "slots": [], "error": None}
+        inst.begin(touch=False)
+        try:
+            r = await inst._client.get("/slots", timeout=2)
+            if r.status_code != 200:
+                out["error"] = "Slot info is disabled (--no-slots)." if r.status_code in (404, 501) else f"HTTP {r.status_code}"
+            else:
+                out["slots"] = [{"id": s.get("id"), "n_ctx": s.get("n_ctx"), "used": s.get("n_prompt_tokens") or 0,
+                                 "processing": bool(s.get("is_processing")),
+                                 "decoded": ((s.get("next_token") or [{}])[0].get("n_decoded") or 0)} for s in r.json()]
+        except (httpx.HTTPError, ValueError, AttributeError) as e:
+            out["error"] = str(e) or type(e).__name__
+        finally:
+            inst.end(touch=False)
+        return out
+    return {"instances": list(await asyncio.gather(*(one(i) for i in manager.instances.values() if i.state == "ready")))}
+
+
 class RunBody(BaseModel):
     run_id: int | None = None  # none = every server
 
