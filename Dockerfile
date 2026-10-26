@@ -33,8 +33,10 @@ ARG AUDIO_CPP_REPO=https://github.com/0xShug0/audio.cpp
 ARG AUDIO_CPP_REF=0097d365a00b52a6991ad7618f0a04e8d2935e47
 RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates \
     && rm -rf /var/lib/apt/lists/*
+# audio.cpp's .gitmodules point at git@github.com:..., and the image has no ssh, so fetch submodules over https.
 RUN if [ "${AUDIO_CPP_REF}" = "none" ]; then mkdir -p /src; else \
-      git clone "${AUDIO_CPP_REPO}" /src \
+      git config --global url."https://github.com/".insteadOf "git@github.com:" \
+      && git clone "${AUDIO_CPP_REPO}" /src \
       && cd /src && git checkout --quiet "${AUDIO_CPP_REF}" \
       && git submodule update --init --recursive --depth 1 \
       && git log -1 --format='audio.cpp %h (%cd)' --date=short; \
