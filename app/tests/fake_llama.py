@@ -56,6 +56,7 @@ PORT = int(opt("--port", default="8081"))
 ALIAS = opt("-a", "--alias", default=MODEL)
 CTX = int(opt("-c", "--ctx-size", default="4096"))
 LOAD_S = float(os.environ.get("FAKE_LOAD_S", "0.3"))
+NP = max(1, int(opt("-np", "--parallel", default="1")))
 EMBED = "--embeddings" in args or "--embedding" in args
 T0 = time.time()
 LOG = os.environ.get("FAKE_LOG")
@@ -69,6 +70,11 @@ SPEC_N = int(opt("--spec-draft-n-max", default="3"))
 
 print(f"fake llama-server: {MODEL} on {PORT} alias={ALIAS}", flush=True)
 print(f"llama threadpool init, n_threads = {THREADS}", flush=True)
+for line in ("load_tensors:      Vulkan0 model buffer size =  1234.00 MiB",
+             "load_tensors:   CPU_Mapped model buffer size =    50.00 MiB",
+             "llama_kv_cache:    Vulkan0 KV buffer size =   256.00 MiB",
+             "sched_reserve:    Vulkan0 compute buffer size =   300.00 MiB"):
+    print(line, flush=True)
 
 
 def completion_timings(n_predict: int, n_prompt: int) -> dict:
@@ -84,6 +90,30 @@ def completion_timings(n_predict: int, n_prompt: int) -> dict:
         accepted = round(drafted * max(0.1, 0.9 - 0.04 * n))
     return {"prompt_n": n_prompt, "prompt_per_second": prefill, "predicted_n": n_predict, "predicted_per_second": decode,
             "draft_n": drafted, "draft_n_accepted": accepted}
+# A stand-in for the built-in chat page: like the real one, it only uses relative URLs.
+UI_HTML = b"""<!doctype html><meta charset="utf-8"><title>llama.cpp - chat</title>
+<link rel="stylesheet" href="./_app/app.css"><div id="model"></div><div id="reply"></div>
+<script type="module" src="./_app/app.js"></script>"""
+UI_CSS = b"body{font:14px sans-serif}"
+UI_JS = b"""const props = await (await fetch('./props')).json();
+document.getElementById('model').textContent = props.model_alias;
+const r = await fetch('./v1/chat/completions', {method: 'POST', headers: {'content-type': 'application/json'},
+  body: JSON.stringify({stream: true, messages: [{role: 'user', content: 'hello'}]})});
+const reader = r.body.getReader(), dec = new TextDecoder();
+let text = '', buf = '';
+for (;;) {
+  const {done, value} = await reader.read();
+  if (done) break;
+  buf += dec.decode(value, {stream: true});
+  const lines = buf.split('\\n'); buf = lines.pop();
+  for (const l of lines) if (l.startsWith('data: {')) text += JSON.parse(l.slice(6)).choices[0].delta.content || '';
+}
+document.getElementById('reply').textContent = text;
+document.body.dataset.done = '1';
+"""
+UI = {"/": (UI_HTML, "text/html; charset=utf-8"), "/index.html": (UI_HTML, "text/html; charset=utf-8"),
+      "/_app/app.css": (UI_CSS, "text/css"), "/_app/app.js": (UI_JS, "text/javascript")}
+
 if "crash" in MODEL:
     time.sleep(0.2)
     print("error: failed to load model (out of memory)", flush=True)
@@ -115,8 +145,13 @@ class H(BaseHTTPRequestHandler):
                 return self._send(503, {"error": {"message": "Loading model"}})
             return self._send(200, {"status": "ok"})
         if self.path.startswith("/props"):
-            return self._send(200, {"default_generation_settings": {"n_ctx": CTX}, "total_slots": 1,
+            return self._send(200, {"default_generation_settings": {"n_ctx": CTX}, "total_slots": NP,
                                     "build_info": "fake-1", "modalities": {"vision": False}, "model_alias": ALIAS})
+        if self.path.startswith("/slots"):
+            cell, t = CTX // NP, int(time.time() - T0)
+            return self._send(200, [{"id": i, "n_ctx": cell, "is_processing": i == 0,
+                                     "n_prompt_tokens": (t * 37 + i * cell // 3) % cell,
+                                     "next_token": [{"n_decoded": (t * 5 + i) % 200}]} for i in range(NP)])
         if self.path.startswith("/metrics"):
             text = ("# HELP llamacpp:prompt_tokens_total Number of prompt tokens processed.\n"
                     "# TYPE llamacpp:prompt_tokens_total counter\n"
@@ -125,6 +160,8 @@ class H(BaseHTTPRequestHandler):
                     "# TYPE llamacpp:requests_processing gauge\n"
                     "llamacpp:requests_processing 0\n")
             return self._send(200, text.encode(), "text/plain; version=0.0.4")
+        if self.path.split("?")[0] in UI:
+            return self._send(200, *UI[self.path.split("?")[0]])
         if self.path.startswith("/v1/models"):
             return self._send(200, {"object": "list", "data": [{"id": ALIAS, "object": "model", "created": 1, "owned_by": "llamacpp"}]})
         return self._send(404, {"error": {"message": "not found"}})

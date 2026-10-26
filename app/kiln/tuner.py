@@ -25,6 +25,7 @@ Measured speeds still vary by a percent or two between runs; the margin keeps th
 from __future__ import annotations
 
 import asyncio
+import itertools
 import json
 import os
 import random
@@ -36,7 +37,8 @@ from collections import deque
 
 import httpx
 
-from . import config, db, events, flags, gpu, models
+from . import config, db, events, flags, gpu, models, tunespace
+from .tunespace import DIMS, GRID_ORDER, SPEC_ORDER
 from .server import manager
 
 PORT = config.TUNER_PORT
@@ -59,6 +61,13 @@ TUNED_FLAGS = {"-ngl", "--gpu-layers", "--n-gpu-layers", "-c", "--ctx-size", "-n
                "-fit", "--fit", "-ncmoe", "--n-cpu-moe", "-cmoe", "--cpu-moe"}
 # Tuned only by the context objective, where weights in system RAM make the CPU part of the benchmark.
 THREAD_FLAGS = {"-t", "--threads", "-tb", "--threads-batch"}
+# Dimensions the candidate configs carry only when the search space sets them (see tunespace.py).
+EXTRA_KEYS = [k for k in GRID_ORDER if k not in ("fa", "ub", "b", "np", "threads", "threads_batch")]
+SPEC_KEYS = ("spec", "draft", "nmax")
+UNQUANTIZED = ("f16", "f32", "bf16")
+# _needs_more: these have no VRAM effect; these only grow memory with their value; everything else must be equal.
+NO_MEMORY_EFFECT = {"threads", "threads_batch", "numa", "poll", "prio", "cache_reuse", "nmin", "pmin", "load_mode", "repack"}
+GROWS = ("ub", "b", "ngld")
 THREADS_RE = re.compile(r"threadpool init, n_threads = (\d+)")
 
 SHORT_PROMPTS = [
@@ -134,8 +143,10 @@ class Tuner:
         ctx = int(params.get("ctx") or 0)
         if ctx < 512:
             raise ValueError("Choose a target context of at least 512 tokens.")
+        params["space"] = space = tunespace.normalize(params.get("space"))
         depth = int(params.get("depth") or 8192)
-        params["depth"] = max(256, min(depth, ctx - N_DEEP - 64))
+        smallest = min([int(v) for v in _vals(space, "ctx")] or [ctx])  # every context in the space must hold the deep prompt
+        params["depth"] = max(256, min(depth, smallest - N_DEEP - 64))
         params["objective"] = params.get("objective") or "decode"
         if params["objective"] not in ("decode", "balanced", "prefill", "context"):
             raise ValueError("Unknown objective.")
@@ -159,12 +170,17 @@ class Tuner:
                 base = {"flags": json.loads(row["flags"]), "env": json.loads(row["env"])}
         else:
             base["flags"] = [{"flag": "--jinja", "value": None}]
-        tuned = TUNED_FLAGS | THREAD_FLAGS if params["objective"] == "context" else TUNED_FLAGS
+        tuned = (TUNED_FLAGS | THREAD_FLAGS if params["objective"] == "context" else TUNED_FLAGS) | tunespace.stripped_flags(space)
         # What the preset already used is measured too, so a hand-picked thread count gets a fair test.
         params["base_threads"] = [n for n in (_flag_int(base["flags"], ("-t", "--threads")),
                                               _flag_int(base["flags"], ("-tb", "--threads-batch"))) if n]
         base["flags"] = [f for f in base["flags"] if f["flag"] not in tuned]
         params["base"] = base
+        if not _batch_pairs(space, params.get("vary_batch")):
+            raise ValueError("No micro-batch size fits under the logical batch size: the logical batch must be at least as large.")
+        tunespace.check({"objective": params["objective"], "mode": params["mode"], "kv_policy": params["kv_policy"],
+                         "vary_batch": bool(params.get("vary_batch")), "space": space, "kv_ladder": KV_LADDER,
+                         "ubatches": UBATCHES, "spec_groups": _spec_groups(params)})
 
         previous = manager.snapshot() or None  # everything running now comes back afterwards
         params["previous"] = previous
@@ -196,8 +212,10 @@ class Tuner:
         error = None
         best = None
         try:
+            space = p.get("space") or {}
             cfg = {"ngl": "99", "ctx": str(p["ctx"]), "np": "1", "fa": "on", "ctk": "f16", "ctv": "f16",
-                   "ub": "512", "b": "2048", **NO_SPEC, "ncmoe": None, "threads": None, "threads_batch": None}
+                   "ub": "512", "b": "2048", **NO_SPEC, "ncmoe": None, "threads": None, "threads_batch": None,
+                   **_baseline(p)}
 
             async def trial(stage: str, label: str, c: dict, fresh: bool = False) -> dict:
                 key = json.dumps(c, sort_keys=True)
@@ -219,8 +237,7 @@ class Tuner:
                 trials.append({"n": len(trials) + 1, "stage": stage, "label": label, "cfg": dict(c),
                                "ok": False, "fits": False, "pruned": True, "error": reason, "score": None})
 
-            def better(t: dict, inc: dict) -> bool:
-                return t["ok"] and t["score"] is not None and t["score"] > inc["score"] * (1 + NOISE)
+            better = _better
 
             async def probe(label: str, c: dict) -> bool:
                 """Load only: does this configuration start with the VRAM headroom? Cached."""
@@ -258,22 +275,33 @@ class Tuner:
                 return inc
 
             if p["objective"] == "context":
-                incumbent = await self._spill_search(p, cfg, trial, probe, confirm)
+                incumbent = await self._spill_search(p, cfg, trial, probe, confirm, skip)
             else:
-                # 1. KV cache: which types fit at the target context with headroom (f16 first).
+                # 1. KV cache: which types fit at the target context with headroom (f16 first). The space
+                #    can widen this to contexts x offload x KV pairs; the first context and offload with a fit wins.
                 kv_fit: list[dict] = []
-                for ngl in ("99", "auto"):
-                    for k, v in KV_LADDER:
-                        c = {**cfg, "ngl": ngl, "ctk": k, "ctv": v, "fa": "on"}
-                        t = await trial("KV cache", (f"-ngl {ngl} · " if ngl != "99" else "") + _combo_label(c), c)
-                        if t["ok"]:
-                            kv_fit.append(t)
-                            if p["kv_policy"] == "precise":
+                ctxs = _contexts(p)
+                fa0, (cfg["ub"], cfg["b"]) = _fit_fa(space), _fit_batch(space, p.get("vary_batch"))
+                pairs = tunespace.kv_pairs(space, KV_LADDER)
+                for ctx in ctxs:
+                    for ngl in tunespace.values(space, "ngl", ["99", "auto"]):
+                        for ncmoe in _vals(space, "ncmoe") or [None]:
+                            for k, v in pairs:
+                                c = {**cfg, "ctx": str(ctx), "ngl": ngl, "ncmoe": ncmoe, "ctk": k, "ctv": v, "fa": fa0}
+                                pre = (f"-c {ctx} · " if ctx != ctxs[0] else "") + ("-ngl auto · " if ngl == "auto" else "")
+                                t = await trial("KV cache", pre + _combo_label(c), c)
+                                if t["ok"]:
+                                    kv_fit.append(t)
+                                    if p["kv_policy"] == "precise":
+                                        break
+                            if kv_fit:
                                 break
+                        if kv_fit:
+                            break
                     if kv_fit:
                         break
                 if not kv_fit:
-                    raise RuntimeError(f"No configuration fits {p['ctx']:,} tokens of context with "
+                    raise RuntimeError(f"No configuration fits {ctxs[-1]:,} tokens of context with "
                                        f"{p['headroom_mib']} MiB to spare. Lower the target context.")
                 incumbent = kv_fit[0]
                 incumbent["chosen"] = True
@@ -281,34 +309,52 @@ class Tuner:
 
                 if p["mode"] == "quick":
                     # One flag at a time, each change kept only if it wins by more than NOISE.
-                    self._plan_max("fa", 2 if incumbent["cfg"]["ctv"] == "f16" else 0)
-                    if incumbent["cfg"]["ctv"] == "f16":
-                        for fa in ("off", "auto"):
-                            t = await trial("Flash attention", f"-fa {fa}", {**incumbent["cfg"], "fa": fa})
-                            if better(t, incumbent):
-                                incumbent = t
-                                t["chosen"] = True
-                    for ub in UBATCHES:
-                        c = {**incumbent["cfg"], "ub": ub, "b": str(max(2048, int(ub)))}
-                        t = await trial("Batch size", f"-ub {ub} -b {c['b']}", c)
+                    fa_sp = space.get("fa")
+                    if fa_sp is None:
+                        self._plan_max("fa", 2 if incumbent["cfg"]["ctv"] == "f16" else 0)
+                        fas = ["off", "auto"] if incumbent["cfg"]["ctv"] == "f16" else []
+                    else:
+                        fas = [v for v in fa_sp["values"] if v != incumbent["cfg"]["fa"]] if fa_sp["mode"] == "list" else []
+                        self._plan_max("fa", len(fas))
+                    for fa in fas:
+                        c = {**incumbent["cfg"], "fa": fa}
+                        if why := _prune_reason(c, p, slots=False):
+                            skip("Flash attention", f"-fa {fa}", c, why)
+                            continue
+                        t = await trial("Flash attention", f"-fa {fa}", c)
                         if better(t, incumbent):
                             incumbent = t
                             t["chosen"] = True
+                    if "ub" not in space or _listmode(space, "ub"):
+                        for ub in tunespace.values(space, "ub", UBATCHES):
+                            if (b := _b_for(space, ub)) is None:
+                                continue
+                            c = {**incumbent["cfg"], "ub": ub, "b": b}
+                            t = await trial("Batch size", f"-ub {ub} -b {b}", c)
+                            if better(t, incumbent):
+                                incumbent = t
+                                t["chosen"] = True
+                    incumbent = await self._sweep(p, incumbent, _speed_dims(p, ("fa", "ub")), trial, skip, mark=True)
                     for s in spec_opts[1:]:
-                        c = {**incumbent["cfg"], **s}
+                        c = _with_spec(incumbent["cfg"], s)
                         t = await trial(f"Speculative ({SPEC_LABEL.get(s['spec'], s['spec'])})", _spec_flags(s), c)
                         if better(t, incumbent):
                             incumbent = t
                             t["chosen"] = True
+                    incumbent = await self._sweep(p, incumbent, _sub_dims(p, incumbent), trial, skip, mark=True)
                 else:
                     # 2. Every combination, in a fixed nested order. A configuration that doesn't fit
                     #    prunes the ones that need strictly more memory (same KV/FA, larger or equal
                     #    batches and draft length), which are recorded without being run.
                     too_big: list[dict] = []
                     # Each fitting KV type already ran its first combination (-fa on, -ub 512, no speculation).
-                    self._plan_max("grid", sum(1 for _ in _grid(kv_fit, spec_opts, p.get("vary_batch"))) - len(kv_fit))
-                    for c in _grid(kv_fit, spec_opts, p.get("vary_batch")):
+                    ran = lambda c: json.dumps(c, sort_keys=True) in cache
+                    self._plan_max("grid", sum(1 for c in _grid(kv_fit, spec_opts, p.get("vary_batch"), space) if not ran(c)))
+                    for c in _grid(kv_fit, spec_opts, p.get("vary_batch"), space):
                         label = _combo_label(c)
+                        if not ran(c) and (why := _prune_reason(c, p)):
+                            skip("Grid", label, c, why)
+                            continue
                         if any(_needs_more(c, f) for f in too_big):
                             skip("Grid", label, c, "not run: a smaller configuration already didn't fit")
                             continue
@@ -356,23 +402,35 @@ class Tuner:
         except Exception as e:  # never let a restore failure mask the tuning result
             events.publish("tune_note", {"message": f"Could not restart the previous server: {e}"})
 
-    async def _spill_search(self, p: dict, cfg: dict, trial, probe, confirm) -> dict:
+    async def _spill_search(self, p: dict, cfg: dict, trial, probe, confirm, skip) -> dict:
         """Context objective: keep the target context, spill weights to system RAM until it fits.
 
         For each KV type (f16 first; every type with kv_policy "all") and each micro-batch, bisect
         the smallest spill that loads with the VRAM headroom, then benchmark it. Bigger micro-batches
-        need at least the previous spill, so each search starts where the last one ended.
+        need at least the previous spill, so each search starts where the last one ended. When the
+        space gives the spill axis fixed or listed values, those are probed instead, fewest layers in
+        system RAM first, and the first that loads is benchmarked. A list of contexts is tried from the
+        largest; the first with a measurable configuration is used.
         """
-        moe = p["is_moe"]
-        max_n = _spill_max(p, moe)
-        ram_cap = _ram_cap(p, max_n)
+        space = p.get("space") or {}
+        axis = _spill_axis(p)
+        max_n = _spill_max(p, axis)
+        ram_cap = _ram_cap(p, max_n) if max_n else None
         if ram_cap is not None and ram_cap < max_n:
             max_n = ram_cap
-        kv_opts = KV_LADDER if p["kv_policy"] == "all" else KV_LADDER[:1]
+        pairs = tunespace.kv_pairs(space, KV_LADDER)
+        kv_opts = pairs if p["kv_policy"] == "all" else pairs[:1]
+        fa0 = _fit_fa(space)
+        explicit = [v for v in _vals(space, axis) if space[axis]["mode"] in ("fixed", "list")] if axis else []
+        explicit.sort(key=lambda v: _spill_value(p, axis, v))  # stable: the given order breaks ties
+        batches = _batch_pairs(space, False)
+        for other in ("ngl", "ncmoe"):  # the axis that is not spilled is held at its first value
+            if other != axis and _vals(space, other):
+                cfg = {**cfg, other: _vals(space, other)[0]}
 
         async def smallest(c: dict, lo: int) -> int | None:
             def at(n: int) -> dict:
-                return _spilled(c, n, p, moe)
+                return _spilled(c, n, p, axis)
             if await probe(_combo_label(at(lo)), at(lo)):
                 return lo
             # From an earlier answer the next one is usually a layer or two up: gallop 1, 2, 4…
@@ -396,52 +454,82 @@ class Tuner:
                     bad = mid
             return good
 
-        measured: list[dict] = []
-        for k, v in kv_opts:
-            lo = 0
-            for ub in UBATCHES:
-                c = {**cfg, "ctk": k, "ctv": v, "fa": "on", "ub": ub, "b": str(max(2048, int(ub)))}
-                n = await smallest(c, lo)
-                if n is None:
-                    break  # larger micro-batches need even more VRAM
-                lo = n
-                # The benchmark can need a little more than the load did; step the spill up twice at most.
-                for extra in (0, 1, max(2, max_n // 16)):
-                    if n + extra > max_n:
-                        break
-                    c2 = _spilled(c, n + extra, p, moe)
-                    t = await trial("Spill", _combo_label(c2), c2)
-                    if t["ok"]:
-                        measured.append(t)
-                        break
-                    if "VRAM" not in (t.get("error") or ""):
-                        break
+        async def spill_at(cfg: dict) -> list[dict]:
+            measured: list[dict] = []
+            for k, v in kv_opts:
+                lo = 0
+                for ub, b in batches:
+                    c = {**cfg, "ctk": k, "ctv": v, "fa": fa0, "ub": ub, "b": b}
+                    if explicit:
+                        for x in explicit:
+                            c2 = _with_spill(c, x, axis)
+                            if await probe(_combo_label(c2), c2):
+                                t = await trial("Spill", _combo_label(c2), c2)
+                                if t["ok"]:
+                                    measured.append(t)
+                                break
+                        continue
+                    n = await smallest(c, lo)
+                    if n is None:
+                        if "ub" not in space:
+                            break  # larger micro-batches need even more VRAM
+                        continue
+                    lo = n
+                    # The benchmark can need a little more than the load did; step the spill up twice at most.
+                    for extra in (0, 1, max(2, max_n // 16)):
+                        if n + extra > max_n:
+                            break
+                        c2 = _spilled(c, n + extra, p, axis)
+                        t = await trial("Spill", _combo_label(c2), c2)
+                        if t["ok"]:
+                            measured.append(t)
+                            break
+                        if "VRAM" not in (t.get("error") or ""):
+                            break
+            return measured
+
+        ctxs = _contexts(p)
+        for ctx in ctxs:
+            measured = await spill_at({**cfg, "ctx": str(ctx)})
+            if measured:
+                break
         if not measured:
-            unit = "the expert weights of every layer" if moe else "every layer"
-            ram = f" ({ram_cap} of {_spill_max(p, moe)} layers fit in free system RAM)" if ram_cap is not None and ram_cap < _spill_max(p, moe) else ""
-            raise RuntimeError(f"{p['ctx']:,} tokens of context doesn't fit with {p['headroom_mib']} MiB of VRAM "
-                               f"to spare even with {unit} in system RAM{ram}. Lower the target context.")
+            unit = "the expert weights of every layer" if axis == "ncmoe" else "every layer"
+            full = _spill_max(p, axis)
+            ram = f" ({ram_cap} of {full} layers fit in free system RAM)" if ram_cap is not None and ram_cap < full else ""
+            where = f"even with {unit} in system RAM{ram}" if axis else "without spilling anything to system RAM"
+            raise RuntimeError(f"{ctxs[-1]:,} tokens of context doesn't fit with {p['headroom_mib']} MiB of VRAM "
+                               f"to spare {where}. Lower the target context.")
 
         lead = await self._thread_search(p, max(measured, key=lambda t: (t["score"], -t["n"])), trial)
+        lead = await self._sweep(p, lead, _speed_dims(p, ("ub", "b", "threads", "threads_batch")), trial, skip)
 
         # Speculative decoding on the fastest configuration so far. The MTP head and a draft file need
         # a little VRAM, so one that doesn't load steps the spill up, as a benchmark does; a length that
         # worked keeps its step for the longer ones.
-        steps = (0, 1, max(2, max_n // 16))
+        steps = (0,) if explicit else (0, 1, max(2, max_n // 16))
         start_at: dict[tuple, int] = {}
+        spec_trials: list[dict] = []
         for s in _spec_options(p):
-            c = {**lead["cfg"], **s}
+            c = _with_spec(lead["cfg"], s)
             key = (s["spec"], s["draft"])
             for i in range(start_at.get(key, 0), len(steps)):
-                n = _spill_of(c, p, moe) + steps[i]
+                n = _spill_of(c, p, axis) + steps[i]
                 if n > max_n:
                     break
-                c2 = _spilled(c, n, p, moe) if steps[i] else c
+                c2 = _spilled(c, n, p, axis) if steps[i] else c
                 t = await trial(f"Speculative ({SPEC_LABEL.get(s['spec'], s['spec'])})", _combo_label(c2), c2)
                 if t["ok"]:
                     start_at[key] = i
+                    spec_trials.append(t)
                 if t["ok"] or "VRAM" not in (t.get("error") or ""):
                     break
+        # The draft settings are tried on the best speculative option, if it beat the lead.
+        best_spec = lead
+        for t in spec_trials:
+            if _better(t, best_spec):
+                best_spec = t
+        await self._sweep(p, best_spec, _sub_dims(p, best_spec), trial, skip)
         return await confirm()
 
     async def _thread_search(self, p: dict, lead: dict, trial) -> dict:
@@ -451,13 +539,20 @@ class Tuner:
         llama.cpp's default (-t -1) is the baseline. Fewer threads can be as fast when memory bandwidth
         is the limit, and the logical CPUs can help prompt processing. -t is swept first (-tb follows
         it unless set), then -tb on the best -t. A change is kept only if it wins by more than NOISE.
+        The space can fix a count or switch the sweep off for either flag, or replace the candidates
+        with its own list (exactly those, nothing added).
         """
+        space = p.get("space") or {}
+        gen_mode = space.get("threads", {}).get("mode", "auto")
+        batch_mode = space.get("threads_batch", {}).get("mode", "auto")
         auto = (lead.get("threads_used") if not lead["cfg"].get("threads") else None) or _default_threads()
         logical = _cpu_count()
         known = set(p.get("base_threads") or [])
-        generation_steps = _thread_candidates(auto, logical, known)
+        generation_steps = (_thread_candidates(auto, logical, known) if gen_mode == "auto"
+                            else [int(v) for v in space["threads"]["values"]] if gen_mode == "list" else [])
         batch_pool = {n for n in {auto, logical, *known} if 1 <= n <= logical}
-        self._plan_max("threads", len(generation_steps) + len(batch_pool))  # one fewer once -t is chosen
+        self._plan_max("threads", len(generation_steps) + (len(batch_pool) if batch_mode == "auto" else
+                                                           len(space["threads_batch"]["values"]) if batch_mode == "list" else 0))
         best = lead
         for n in generation_steps:
             c = {**lead["cfg"], "threads": str(n)}
@@ -465,7 +560,8 @@ class Tuner:
             if t["ok"] and t["score"] > best["score"] * (1 + NOISE):
                 best = t
         generation = int(best["cfg"]["threads"] or auto)
-        batch_steps = sorted(batch_pool - {generation})
+        batch_steps = (sorted(batch_pool - {generation}) if batch_mode == "auto"
+                       else [int(v) for v in space["threads_batch"]["values"]] if batch_mode == "list" else [])
         self._plan_max("threads", len(generation_steps) + len(batch_steps))
         for n in batch_steps:
             c = {**best["cfg"], "threads_batch": str(n)}
@@ -473,6 +569,28 @@ class Tuner:
             if t["ok"] and t["score"] > best["score"] * (1 + NOISE):
                 best = t
         return best
+
+    async def _sweep(self, p: dict, inc: dict, keys: list[str], trial, skip, mark: bool = False) -> dict:
+        """One list-mode dimension at a time on the incumbent: each value it doesn't already have, kept
+        only for a >NOISE win. The stage is named after the dimension."""
+        space = p.get("space") or {}
+        for key in keys:
+            label = DIMS[key]["label"]
+            vals = [v for v in space[key]["values"] if v != inc["cfg"].get(key)
+                    and not (key == "b" and int(v) < int(inc["cfg"]["ub"]))]
+            self._plan_max("dim:" + key, len(vals))
+            for v in vals:
+                c = {**inc["cfg"], key: v}
+                name = _flags_text(key, v) or f"{label} {v}"
+                if why := _prune_reason(c, p, slots=False):
+                    skip(label, name, c, why)
+                    continue
+                t = await trial(label, name, c)
+                if _better(t, inc):
+                    inc = t
+                    if mark:
+                        t["chosen"] = True
+        return inc
 
     # ------------------------------------------------------------ one candidate
 
@@ -694,29 +812,46 @@ class Tuner:
             events.publish("tune", row)
 
 
-def _tuned_args(c: dict) -> list[str]:
+def _tuned_rows(c: dict) -> list[dict]:
+    """The flag rows of a candidate: the saved preset's tuned part, and (flattened) the command line.
+    A row's value is None for a flag without one (--kv-unified)."""
     # Full offload is measured exactly as given (--fit off). Only when nothing fits fully does the
     # tuner let llama.cpp's --fit choose how many layers go to the GPU; context stays fixed by -c.
-    gpu = ["--fit", "on"] if c["ngl"] == "auto" else ["-ngl", c["ngl"], "--fit", "off"]
+    pairs = [("--fit", "on")] if c["ngl"] == "auto" else [("-ngl", c["ngl"]), ("--fit", "off")]
     if c.get("ncmoe"):
-        gpu += ["--n-cpu-moe", c["ncmoe"]]
-    args = [*gpu, "-c", c["ctx"], "-np", c["np"], "-fa", c["fa"], "-ctk", c["ctk"], "-ctv", c["ctv"],
-            "-ub", c["ub"], "-b", c["b"]]
+        pairs.append(("--n-cpu-moe", c["ncmoe"]))
+    pairs += [("-c", c["ctx"]), ("-np", c["np"]), ("-fa", c["fa"]), ("-ctk", c["ctk"]), ("-ctv", c["ctv"]),
+              ("-ub", c["ub"]), ("-b", c["b"])]
     if c.get("spec"):
-        args += ["--spec-type", c["spec"]]
+        pairs.append(("--spec-type", c["spec"]))
         if c.get("draft"):
-            args += ["-md", c["draft"]]
-        args += ["--spec-draft-n-max", c["nmax"]]
+            pairs.append(("-md", c["draft"]))
+        pairs.append(("--spec-draft-n-max", c["nmax"]))
     if c.get("threads"):
-        args += ["-t", c["threads"]]
+        pairs.append(("-t", c["threads"]))
     if c.get("threads_batch"):
-        args += ["-tb", c["threads_batch"]]
-    return args
+        pairs.append(("-tb", c["threads_batch"]))
+    rows = [{"flag": f, "value": v} for f, v in pairs]
+    for key in [*EXTRA_KEYS, *SPEC_ORDER]:  # the dimensions only a search space sets, after today's flags
+        if _applies(c, key):
+            rows += tunespace.emit(key, c[key])
+    return rows
 
 
-def _tuned_rows(c: dict) -> list[dict]:
-    a = _tuned_args(c)
-    return [{"flag": a[i], "value": a[i + 1]} for i in range(0, len(a), 2)]
+def _tuned_args(c: dict) -> list[str]:
+    return [x for r in _tuned_rows(c) for x in ((r["flag"],) if r["value"] is None else (r["flag"], r["value"]))]
+
+
+def _applies(c: dict, key: str) -> bool:
+    """Is this dimension set on the candidate (draft settings only count with the speculative option they belong to)?"""
+    if c.get(key) is None:
+        return False
+    cls = DIMS[key]["cls"]
+    return bool(c.get("spec")) if cls == "SPEC" else bool(c.get("draft")) if cls == "DRAFT" else True
+
+
+def _flags_text(key: str, value: str) -> str:
+    return " ".join(r["flag"] if r["value"] is None else f"{r['flag']} {r['value']}" for r in tunespace.emit(key, value))
 
 
 def _combo_label(c: dict) -> str:
@@ -728,7 +863,11 @@ def _combo_label(c: dict) -> str:
     threads = " ".join(f"{flag} {c[key]}" for flag, key in (("-t", "threads"), ("-tb", "threads_batch")) if c.get(key))
     if threads:
         parts.append(threads)
+    if c.get("np") not in (None, "1"):
+        parts.append(f"-np {c['np']}")
+    parts += [t for k in EXTRA_KEYS if _applies(c, k) and (t := _flags_text(k, c[k]))]
     parts.append(f"{SPEC_LABEL.get(c['spec'], c['spec'])} {c['nmax']}" if c.get("spec") else "no spec")
+    parts += [t for k in SPEC_ORDER if _applies(c, k) and (t := _flags_text(k, c[k]))]
     return " · ".join(parts)
 
 
@@ -736,20 +875,122 @@ def _complexity(c: dict) -> int:
     """How far a configuration is from llama.cpp's defaults; fewer changes win ties."""
     return ((c["fa"] != "on") + (c["ub"] != "512") + (c["b"] != "2048") + bool(c.get("spec"))
             + (c["ctk"] != "f16") + (c["ctv"] != "f16") + bool(c.get("ncmoe"))
-            + (c.get("ngl") not in (None, "99", "auto")) + bool(c.get("threads")) + bool(c.get("threads_batch")))
+            + (c.get("ngl") not in (None, "99", "auto")) + bool(c.get("threads")) + bool(c.get("threads_batch"))
+            + (c.get("np") not in (None, "1")) + sum(_applies(c, k) and bool(tunespace.emit(k, c[k])) for k in [*EXTRA_KEYS, *SPEC_ORDER]))
 
 
-def _grid(kv_fit: list[dict], spec_opts: list[dict], vary_batch: bool):
-    """Every combination of the grid search in its fixed nested order: KV type, flash attention,
-    -ub, -b, speculative option."""
+def _vals(space: dict, key: str) -> list[str]:
+    """The values the space gives a dimension (fixed, listed, or its off value); [] when it is on auto."""
+    entry = space.get(key)
+    return list(entry["values"]) if entry else []
+
+
+def _listmode(space: dict, key: str) -> bool:
+    return space.get(key, {}).get("mode") == "list"
+
+
+def _contexts(p: dict) -> list[int]:
+    """Contexts to try, largest first: the space's, else the target."""
+    return sorted({int(v) for v in _vals(p.get("space") or {}, "ctx")} or {int(p["ctx"])}, reverse=True)
+
+
+def _baseline(p: dict) -> dict:
+    """What the space puts into every candidate from the start: its fixed values and the first value of
+    each list. The context objective sweeps listed thread counts against llama.cpp's default instead."""
+    space = p.get("space") or {}
+    return {k: v[0] for k in GRID_ORDER if k not in ("fa", "ub", "b") and (v := _vals(space, k))
+            and not (p["objective"] == "context" and k in ("threads", "threads_batch") and _listmode(space, k))}
+
+
+def _fit_fa(space: dict) -> str:
+    """The flash attention the fit stage uses: on when the space allows it."""
+    fa = _vals(space, "fa") or ["on"]
+    return "on" if "on" in fa else fa[0]
+
+
+def _b_for(space: dict, ub: str) -> str | None:
+    """The logical batch to run with a micro-batch: today's max(2048, ub), or the space's first that holds it."""
+    bs = _vals(space, "b")
+    return str(max(2048, int(ub))) if not bs else next((b for b in bs if int(b) >= int(ub)), None)
+
+
+def _fit_batch(space: dict, vary_batch: bool) -> tuple[str, str]:
+    """The (-ub, -b) of the fit stage: 512/2048 unless the space says otherwise."""
+    ubs = tunespace.values(space, "ub", UBATCHES)
+    for ub in ubs if "ub" in space else ["512", *(u for u in ubs if u != "512")]:
+        if (b := _b_for(space, ub)) is not None:
+            return ub, b
+    raise ValueError("No micro-batch size fits under the logical batch size.")
+
+
+def _batch_pairs(space: dict, vary_batch: bool) -> list[tuple[str, str]]:
+    """Every (-ub, -b) to try, micro-batch outer. A logical batch below the micro-batch is never generated."""
+    out = []
+    for ub in tunespace.values(space, "ub", UBATCHES):
+        bs = _vals(space, "b") if "b" in space else \
+            [str(b) for b in sorted({max(2048, int(ub)), *([int(ub), 4096] if vary_batch else [])})]
+        out += [(ub, b) for b in bs if int(b) >= int(ub)]
+    return out
+
+
+def _better(t: dict, inc: dict) -> bool:
+    return t["ok"] and t["score"] is not None and t["score"] > inc["score"] * (1 + NOISE)
+
+
+def _prune_reason(c: dict, p: dict, slots: bool = True) -> str | None:
+    """Why a combination isn't worth running at all, or None."""
+    if c["fa"] == "off" and c["ctv"] not in UNQUANTIZED:
+        return "a quantized V cache needs flash attention"
+    n = int(c.get("np") or 1)
+    if slots and n > 1 and c.get("kvu") != "on" and int(c["ctx"]) // n < p["depth"] + N_DEEP + 64:
+        return f"the deep prompt doesn't fit in one of {n} slots"
+    return None
+
+
+def _with_spec(c: dict, s: dict) -> dict:
+    """The configuration with another speculative option; the previous option's draft settings go."""
+    return {**{k: v for k, v in c.items() if k not in SPEC_KEYS and k not in SPEC_ORDER}, **s}
+
+
+def _speed_dims(p: dict, skip: tuple) -> list[str]:
+    space = p.get("space") or {}
+    return [k for k in GRID_ORDER if k not in skip and _listmode(space, k)]
+
+
+def _sub_dims(p: dict, inc: dict) -> list[str]:
+    """Listed draft settings worth trying on this incumbent: none unless it uses speculative decoding."""
+    space = p.get("space") or {}
+    return [k for k in SPEC_ORDER if _listmode(space, k) and _applies({**inc["cfg"], k: ""}, k)]
+
+
+def _grid(kv_fit: list[dict], spec_opts: list[dict], vary_batch: bool, space: dict | None = None):
+    """Every combination of the grid search in its fixed nested order: KV type, flash attention, -ub,
+    -b, the other speed dimensions the space sets, speculative option (and its draft settings).
+    Combinations a flag can't express (-b below -ub) are not generated; duplicates are dropped."""
+    space = space or {}
+    keys = [k for k in GRID_ORDER if k not in ("fa", "ub", "b") and _vals(space, k)]
+    seen: set[str] = set()
     for kvt in kv_fit:
         base_c = kvt["cfg"]
-        for fa in (["on", "off", "auto"] if base_c["ctv"] == "f16" else ["on"]):
-            for ub in UBATCHES:
-                bs = sorted({max(2048, int(ub)), *([int(ub), 4096] if vary_batch else [])})
-                for bb in [b for b in bs if b >= int(ub)]:
+        fas = _vals(space, "fa") or (["on", "off", "auto"] if base_c["ctv"] == "f16" else ["on"])
+        for fa in fas:
+            for ub, bb in _batch_pairs(space, vary_batch):
+                for combo in itertools.product(*(_vals(space, k) for k in keys)):
                     for s in spec_opts:
-                        yield {**base_c, "fa": fa, "ub": ub, "b": str(bb), **s}
+                        for sv in _spec_variants(space, s):
+                            c = {**base_c, "fa": fa, "ub": ub, "b": bb, **dict(zip(keys, combo)), **sv}
+                            if (key := json.dumps(c, sort_keys=True)) not in seen:
+                                seen.add(key)
+                                yield c
+
+
+def _spec_variants(space: dict, s: dict):
+    """A speculative option at every combination of its listed draft settings (SPEC ones for any,
+    DRAFT ones only with a draft file); the option itself when none is listed."""
+    keys = [k for k in SPEC_ORDER if _listmode(space, k) and (DIMS[k]["cls"] == "SPEC" and s.get("spec")
+                                                              or DIMS[k]["cls"] == "DRAFT" and s.get("draft"))]
+    for combo in itertools.product(*(space[k]["values"] for k in keys)):
+        yield {**s, **dict(zip(keys, combo))}
 
 
 def _plan(p: dict) -> list[dict]:
@@ -757,34 +998,66 @@ def _plan(p: dict) -> list[dict]:
 
     Each has an id, a label, `stages` (the stage names its trials carry) and `max`: the most trials it
     will measure, or None while that isn't known. The run narrows some of them as it learns more (the
-    grid's size once the KV types are known), see Tuner._plan_max.
+    grid's size once the KV types are known), see Tuner._plan_max. Quick and context runs get one
+    `dim:<key>` stage per dimension the space lists.
     """
     def step(step_id: str, label: str, stages: list[str], n: int | None = None) -> dict:
         return {"id": step_id, "label": label, "stages": stages, "max": n}
 
+    def dim(k: str) -> dict:
+        return step("dim:" + k, DIMS[k]["label"], [DIMS[k]["label"]], len(space[k]["values"]))
+
+    space = p.get("space") or {}
+    options = _spec_options(p)
     counts: dict[str, int] = {}
-    for s in _spec_options(p):
+    for s in options:
         name = SPEC_LABEL.get(s["spec"], s["spec"])
         counts[name] = counts.get(name, 0) + 1
     spec = [step("spec:" + name, f"Speculative: {name}", [f"Speculative ({name})"], n) for name, n in counts.items()]
+    subs = [dim(k) for k in SPEC_ORDER if _listmode(space, k) and any(
+        s.get("draft") or DIMS[k]["cls"] == "SPEC" for s in options)]
     confirm = step("confirm", "Confirm", ["Confirm"], 3)
     if p["objective"] == "context":
-        return [step("spill", "Spill search", ["Fit", "Spill"]), step("threads", "CPU threads", ["Threads"]), *spec, confirm]
+        sweeps = [space.get(k, {}).get("mode", "auto") in ("auto", "list") for k in ("threads", "threads_batch")]
+        threads = [step("threads", "CPU threads", ["Threads"])] if any(sweeps) else []
+        return [step("spill", "Spill search", ["Fit", "Spill"]), *threads,
+                *map(dim, _speed_dims(p, ("ub", "b", "threads", "threads_batch"))), *spec, *subs, confirm]
     kv = step("kv", "KV cache", ["KV cache"])
     if p["mode"] == "quick":  # the first fit already ran -ub 512, so one batch size less
-        return [kv, step("fa", "Flash attention", ["Flash attention"], 2),
-                step("batch", "Batch size", ["Batch size"], len(UBATCHES) - 1), *spec]
+        fa, ub = space.get("fa"), space.get("ub")
+        n_fa = 2 if fa is None else len(fa["values"]) - 1 if fa["mode"] == "list" else 0
+        n_ub = len(UBATCHES) - 1 if ub is None else len(ub["values"]) - 1 if ub["mode"] == "list" else 0
+        return [kv, step("fa", "Flash attention", ["Flash attention"], n_fa),
+                step("batch", "Batch size", ["Batch size"], n_ub),
+                *map(dim, _speed_dims(p, ("fa", "ub"))), *spec, *subs]
     return [kv, step("grid", "Every combination", ["Grid"]), confirm]
+
+
+def _spec_groups(p: dict) -> list[dict]:
+    """The speculative option kinds and their draft lengths, as tunespace.count wants them."""
+    space = p.get("space") or {}
+    if space.get("spec", {}).get("mode") == "off":
+        return []
+    groups = [{"lengths": list(MTP_NMAX), "file": False, "block": None}] if p["has_mtp"] and p.get("speculative", True) else []
+    return groups + [{"lengths": _draft_lengths(d), "file": True, "block": int(d.get("block_size") or 0) or None}
+                     for d in p.get("drafts") or []]
 
 
 def _spec_options(p: dict) -> list[dict]:
     """The speculative-decoding candidates for this run: the MTP head and each chosen draft file,
-    each at every draft length worth measuring."""
+    each at every draft length worth measuring (the space's nmax values replace them, clamped to a
+    draft file's block size). Draft settings the space fixes ride along; listed ones are varied by
+    the grid (_spec_variants) or one at a time (quick, context)."""
+    space = p.get("space") or {}
+    if space.get("spec", {}).get("mode") == "off":
+        return []
+    fixed = {k: v[0] for k in SPEC_ORDER if not _listmode(space, k) and (v := _vals(space, k))}
     opts = []
-    if p["has_mtp"] and p.get("speculative", True):
-        opts += [{"spec": "draft-mtp", "draft": None, "nmax": n} for n in MTP_NMAX]
-    for d in p.get("drafts") or []:
-        opts += [{"spec": d["type"], "draft": d["path"], "nmax": n} for n in _draft_lengths(d)]
+    sources = ([None] if p["has_mtp"] and p.get("speculative", True) else []) + list(p.get("drafts") or [])  # None: the MTP head
+    for g, d in zip(_spec_groups(p), sources):
+        sub = {k: v for k, v in fixed.items() if d or DIMS[k]["cls"] == "SPEC"}
+        opts += [{"spec": d["type"] if d else "draft-mtp", "draft": d["path"] if d else None,
+                  "nmax": n, **sub} for n in tunespace._spec_lengths(space, g)]
     return opts
 
 
@@ -840,12 +1113,19 @@ def _flag_int(rows: list[dict], names: tuple[str, ...]) -> int | None:
 
 
 def _needs_more(c: dict, f: dict) -> bool:
-    """Does c need at least the memory of f, a configuration that didn't fit? Same layers, KV types and
-    flash attention, batches no smaller, and either f has no speculative decoding or c uses the same
-    one at no shorter a length (the MTP head and each draft file take different amounts)."""
-    if not (c["ngl"] == f["ngl"] and c["ctk"] == f["ctk"] and c["ctv"] == f["ctv"] and c["fa"] == f["fa"]
-            and int(c["ub"]) >= int(f["ub"]) and int(c["b"]) >= int(f["b"])):
-        return False
+    """Does c need at least the memory of f, a configuration that didn't fit? Everything that takes memory
+    is equal (layers, KV types, flash attention, slots, offload flags...; a missing key is None), the
+    batches and the draft model's GPU layers are no smaller, settings with no VRAM effect are ignored, and
+    either f has no speculative decoding or c uses the same one at no shorter a length (the MTP head and
+    each draft file take different amounts)."""
+    for k in set(c) | set(f):
+        if k in SPEC_KEYS or k in NO_MEMORY_EFFECT:
+            continue
+        if k in GROWS:
+            if int(c.get(k) or 0) < int(f.get(k) or 0):
+                return False
+        elif c.get(k) != f.get(k):
+            return False
     return not f.get("spec") or (c.get("spec") == f["spec"] and c.get("draft") == f.get("draft")
                                  and int(c["nmax"] or 0) >= int(f["nmax"] or 0))
 
@@ -874,23 +1154,47 @@ def _thread_candidates(auto: int, logical: int, known: set[int]) -> list[int]:
     return sorted(n for n in steps if 1 <= n <= logical)
 
 
-def _spill_max(p: dict, moe: bool) -> int:
+def _spill_axis(p: dict) -> str | None:
+    """What spills weights to system RAM: the experts (--n-cpu-moe) of a MoE model, whole layers (-ngl)
+    otherwise; a MoE model whose experts the space holds in VRAM falls back to layers, and None when
+    that is held too."""
+    space = p.get("space") or {}
+    off = lambda k: space.get(k, {}).get("mode") == "off"
+    if p["is_moe"] and not off("ncmoe"):
+        return "ncmoe"
+    return None if off("ngl") else "ngl"
+
+
+def _spill_max(p: dict, axis: str | None) -> int:
     """Largest spill: every layer's experts (MoE), or every layer plus the output layer (dense)."""
-    return p["n_layers"] if moe else p["n_layers"] + 1
+    return p["n_layers"] if axis == "ncmoe" else p["n_layers"] + 1 if axis == "ngl" else 0
 
 
-def _spill_of(c: dict, p: dict, moe: bool) -> int:
+def _spill_of(c: dict, p: dict, axis: str | None) -> int:
     """How many layers' weights this configuration keeps in system RAM (the inverse of _spilled)."""
-    if moe:
+    if axis == "ncmoe":
         return int(c.get("ncmoe") or 0)
-    return _spill_max(p, moe) - int(c["ngl"]) if c.get("ngl") not in (None, "99", "auto") else 0
+    if axis == "ngl":
+        return _spill_max(p, axis) - int(c["ngl"]) if c.get("ngl") not in (None, "99", "auto") else 0
+    return 0
 
 
-def _spilled(c: dict, n: int, p: dict, moe: bool) -> dict:
+def _spilled(c: dict, n: int, p: dict, axis: str | None) -> dict:
     """The configuration with n layers' weights in system RAM instead of VRAM."""
-    if moe:
-        return {**c, "ngl": "99", "ncmoe": str(n) if n else None}
-    return {**c, "ngl": str(_spill_max(p, moe) - n) if n else "99", "ncmoe": None}
+    if axis == "ncmoe":
+        return {**c, "ncmoe": str(n) if n else None}
+    if axis == "ngl":
+        return {**c, "ngl": str(_spill_max(p, axis) - n) if n else "99"}
+    return c
+
+
+def _spill_value(p: dict, axis: str, v: str) -> int:
+    """The spill a given -n-cpu-moe or -ngl value means ("auto" lets llama.cpp spill as much as it needs)."""
+    return int(v) if axis == "ncmoe" else _spill_max(p, axis) if v == "auto" else max(0, _spill_max(p, axis) - int(v))
+
+
+def _with_spill(c: dict, v: str, axis: str) -> dict:
+    return {**c, "ncmoe": v if int(v) else None} if axis == "ncmoe" else {**c, "ngl": v}
 
 
 def _ram_cap(p: dict, max_n: int) -> int | None:

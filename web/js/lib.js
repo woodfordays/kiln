@@ -185,8 +185,8 @@ export function StateBadge({ state, size }) {
 
 /* ---------------------------------------------------------------- models that are running */
 
-export const ROLE_LABEL = { chat: 'Chat', embedding: 'Embeddings', rerank: 'Reranker', decision: 'Decision' };
-export const ROLE_TONE = { chat: 'neutral', embedding: 'info', rerank: 'info', decision: 'ember' };
+export const ROLE_LABEL = { chat: 'Chat', embedding: 'Embeddings', rerank: 'Reranker', decision: 'Decision', tts: 'Text to speech', stt: 'Speech to text' };
+export const ROLE_TONE = { chat: 'neutral', embedding: 'info', rerank: 'info', decision: 'ember', tts: 'ember', stt: 'ember' };
 
 export function RoleBadge({ role, size = 'sm' }) {
   return html`<${E.Badge} size=${size} tone=${ROLE_TONE[role] || 'neutral'}>${ROLE_LABEL[role] || role}<//>`;

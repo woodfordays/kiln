@@ -5,6 +5,7 @@ import {
   RANGE_OPTIONS, RANGE_WORDS, PREV_WORDS, delta, StateBadge, RoleBadge, liveOf,
 } from '../lib.js';
 import { LineChart, StackedColumns, Scatter, Legend, Meter, seriesColor } from '../charts.js';
+import { BreakdownCard, ContextFillCard } from '../memviz.js';
 
 const loadPref = (k, d) => { try { return localStorage.getItem(k) || d; } catch { return d; } };
 const savePref = (k, v) => { try { localStorage.setItem(k, v); } catch {} };
@@ -56,6 +57,10 @@ export function OverviewPage() {
     </header>
 
     <${LiveStrip} status=${status} />
+    ${liveOf(status).length > 0 && html`<div className="grid grid--side">
+      <${ContextFillCard} />
+      <${BreakdownCard} runId=${null} title="Memory in use" compact />
+    </div>`}
 
     <div className="filters">
       <${E.SegmentedControl} label="Time range" options=${RANGE_OPTIONS} value=${range} onChange=${setRange} />

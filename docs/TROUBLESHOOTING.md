@@ -12,6 +12,7 @@ docker compose logs -f kiln       # Kiln's output (llama-server's is in the Serv
 
 - [The panel won't load, or a port is taken](#the-panel-wont-load-or-a-port-is-taken)
 - [The GPU isn't used or isn't shown](#the-gpu-isnt-used-or-isnt-shown)
+- [Behind a reverse proxy (HTTPS, a domain)](#behind-a-reverse-proxy-https-a-domain)
 - [A model won't start](#a-model-wont-start)
 - [A request fails or hangs](#a-request-fails-or-hangs)
 - [Downloads](#downloads)
@@ -56,6 +57,30 @@ readings come from. The Overview GPU card says "No GPU telemetry" when Kiln can'
 **Without telemetry** Kiln can't tell how much VRAM is free, so it can't check whether another model fits and
 starts models without asking.
 
+## Behind a reverse proxy (HTTPS, a domain)
+
+Put the control panel port (`:8090`) behind the proxy. It serves everything the browser needs, including
+llama.cpp's own chat page at `/chat/<model>/` (the **Open llama.cpp chat** button on Server), which Kiln
+forwards to that model's llama-server with streaming intact. Every link and redirect Kiln makes there is
+relative, so the scheme and host carry through. Give Kiln a host of its own (`kiln.example.com`): the
+panel calls `/api/…` from the site root, so it doesn't work under a path prefix yet.
+
+| Symptom | Cause and fix |
+|---|---|
+| **Open llama.cpp chat** goes to `https://host:8080` and Firefox says `SSL_ERROR_RX_RECORD_TOO_LONG` (Chrome: `ERR_SSL_PROTOCOL_ERROR`). | An older Kiln linked to the API port by host and port. The browser spoke HTTPS to a port that answers plain HTTP. Update Kiln: the button now opens `chat/<model>/` on the same origin. |
+| The chat page loads, but replies arrive all at once or time out. | The proxy is buffering the event stream. nginx: `proxy_buffering off;` and `proxy_read_timeout 1h;` for the location (Kiln also sends `X-Accel-Buffering: no` where it can). Caddy streams by default. |
+| `/chat/` says "No model is loaded". | No chat model is ready. Start one on the Server page; `/chat/<model>/` opens a specific one by its preset name, slug or alias. |
+| The chat page asks for an API key, then gets `401`. | With `KILN_UI_PASSWORD` set, the panel's Basic login guards `/chat/` too, and a preset `--api-key` sent as a Bearer header replaces that login. Use one or the other for presets you chat with through the panel. |
+| Clients outside the browser need `/v1`. | Proxy `KILN_API_PORT` (`:8080`) as its own site or path, for example `https://llm.example.com` → `http://kiln:8080`. It needs the same streaming settings as above. |
+
+A minimal Caddyfile:
+
+```
+kiln.example.com {
+    reverse_proxy kiln:8090
+}
+```
+
 ## A model won't start
 
 | Symptom | Cause and fix |
@@ -82,6 +107,11 @@ starts models without asking.
 | A model you were using is suddenly gone. | **Unload idle models after** (Settings, 2 hours by default) stopped it, or another model needed its room. Tick **Keep loaded** on the preset to prevent both. You'll get a notification when an idle model is unloaded. |
 | `401` from `:8080`. | The preset has `--api-key …` and the request has no matching key. Kiln passes the header through. |
 | `401` from `:8090/api`. | `KILN_UI_PASSWORD` is on. Use Basic auth (user `kiln`), or `Authorization: Bearer <KILN_API_TOKEN>`. |
+
+## Text to speech says "Could not load eSpeak-ng"
+
+Kokoro and Piper need the eSpeak-ng library, which Kiln's image installs. The image was built before that
+was added: rebuild it (`docker compose build`). Outside Docker, install `libespeak-ng1` and `espeak-ng-data`.
 
 ## Downloads
 

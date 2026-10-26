@@ -14,7 +14,7 @@ from pathlib import Path
 
 import httpx
 
-from . import config, db, events, fit, flags, models, roles
+from . import audiocpp, config, db, events, fit, flags, models, roles
 from .route import slug
 
 ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
@@ -43,7 +43,7 @@ def _port_free(port: int) -> bool:
 
 
 class Instance:
-    """One llama-server process serving one model."""
+    """One llama-server process serving one model (or audiocpp_server, for the audio roles)."""
 
     def __init__(self, fleet: "Fleet", port: int, model: str, rows: list[dict], env: dict, preset: dict | None, role: str) -> None:
         self.fleet = fleet
@@ -51,6 +51,7 @@ class Instance:
         self.url = f"http://127.0.0.1:{port}"
         self.model_path, self.model_name = model, models.display_name(model)
         self.rows, self.env, self.preset, self.role = rows, dict(env), preset, role
+        self.engine = "audiocpp" if role in roles.AUDIO_ROLES else "llama"
         self.state = "starting"  # starting | loading | ready | stopping | stopped | crashed
         self.proc: asyncio.subprocess.Process | None = None
         self.run_id: int | None = None
@@ -95,6 +96,10 @@ class Instance:
         return list(dict.fromkeys(a for a in out if a))
 
     @property
+    def _binary(self) -> str:
+        return "audiocpp_server" if self.engine == "audiocpp" else "llama-server"
+
+    @property
     def draining_or_stopping(self) -> bool:
         return self.draining or self.state in ("stopping", "stopped", "crashed")
 
@@ -130,6 +135,7 @@ class Instance:
             "state": self.state,
             "name": self.name,
             "role": self.role,
+            "engine": self.engine,
             "adapter": self.adapter,
             "pid": self.proc.pid if self.proc and self.proc.returncode is None else None,
             "port": self.port,
@@ -166,11 +172,21 @@ class Instance:
 
     async def spawn(self) -> None:
         final_rows, self.notes = roles.apply(self.role, self.model_path, self.rows)
-        if not any((r.get("flag") or "").strip() in ("-a", "--alias") and r.get("enabled") is not False for r in final_rows):
-            final_rows.append({"flag": "--alias", "value": self.name})
+        full_env = {**os.environ, **{k: str(v) for k, v in self.env.items()}}
+        if self.engine == "audiocpp":
+            conf, extra = audiocpp.config_for(self.name, self.model_path, final_rows, self.role, self.port)
+            conf_path = config.DATA_DIR / "audiocpp" / f"port-{self.port}.json"
+            conf_path.parent.mkdir(parents=True, exist_ok=True)
+            conf_path.write_text(json.dumps(conf, indent=2))
+            self.argv = audiocpp.argv(str(conf_path), extra)
+            # its own ggml libraries first, so they never mix with llama.cpp's
+            full_env["LD_LIBRARY_PATH"] = f"{config.AUDIOCPP_LIB_DIR}:{full_env.get('LD_LIBRARY_PATH', '')}"
+        else:
+            if not any((r.get("flag") or "").strip() in ("-a", "--alias") and r.get("enabled") is not False for r in final_rows):
+                final_rows.append({"flag": "--alias", "value": self.name})
+            self.argv = [config.LLAMA_SERVER, "-m", self.model_path, *flags.to_argv(final_rows),
+                         "--host", "127.0.0.1", "--port", str(self.port), "--metrics"]
         self.adapter = "pplx-v3" if self.role == "decision" and roles.decision_kind(self.model_path) == "pplx-v3" else None
-        self.argv = [config.LLAMA_SERVER, "-m", self.model_path, *flags.to_argv(final_rows),
-                     "--host", "127.0.0.1", "--port", str(self.port), "--metrics"]
         self.started_at = time.time()
         mem = fit.gpu_memory()
         self.vram_at_spawn = mem["used_mib"] if mem else None
@@ -185,14 +201,13 @@ class Instance:
         self._log(f"$ {' '.join(shlex.quote(a) for a in self.argv)}", source="kiln")
         for n in self.notes:
             self._log(n, source="kiln")
-        full_env = {**os.environ, **{k: str(v) for k, v in self.env.items()}}
         try:
             self.proc = await asyncio.create_subprocess_exec(
                 *self.argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
                 stdin=asyncio.subprocess.DEVNULL, env=full_env, start_new_session=True, limit=1 << 20,
             )
         except OSError as e:
-            self.error = f"Could not start llama-server: {e}"
+            self.error = f"Could not start {self._binary}: {e}"
             db.update("runs", self.run_id, {"status": "crashed", "error": self.error, "stopped_at": time.time()})
             await self._client.aclose()
             self._finish("crashed")
@@ -235,7 +250,7 @@ class Instance:
                 self._finish("stopped")
             return
         self._set_state("stopping")
-        self._log("Stopping llama-server", source="kiln")
+        self._log(f"Stopping {self._binary}", source="kiln")
         try:
             os.killpg(self.proc.pid, signal.SIGTERM)
         except ProcessLookupError:
@@ -243,7 +258,7 @@ class Instance:
         try:
             await asyncio.wait_for(self.proc.wait(), config.STOP_TIMEOUT_S)
         except asyncio.TimeoutError:
-            self._log("llama-server did not exit in time; killing it", source="kiln")
+            self._log(f"{self._binary} did not exit in time; killing it", source="kiln")
             try:
                 os.killpg(self.proc.pid, signal.SIGKILL)
             except ProcessLookupError:
@@ -312,6 +327,8 @@ class Instance:
     async def _on_ready(self) -> None:
         self.ready_at = time.time()
         try:
+            if self.engine == "audiocpp":  # no /props
+                raise LookupError
             p = (await self._client.get("/props")).json()
             gen = p.get("default_generation_settings", {})
             self.props = {
@@ -359,7 +376,7 @@ class Instance:
             tail = [l[1] for l in list(self.logs)[-40:] if l[2] == "server"]
             errs = [l for l in tail if re.search(r"error|failed|out of memory|abort|exception", l, re.I)]
             self.error = (errs[-1] if errs else (tail[-1] if tail else f"exit code {code}"))[:500]
-        self._log(f"llama-server exited with code {code}", source="kiln")
+        self._log(f"{self._binary} exited with code {code}", source="kiln")
         db.update("runs", self.run_id, {"status": status, "exit_code": code, "stopped_at": time.time(), "error": self.error})
         if self._logfile:
             self._logfile.close()

@@ -22,11 +22,15 @@ presets, history) are in the Settings page and stored in the database.
 | `KILN_CORS_ORIGINS` | browser extensions | Regex of origins allowed to call `/api` cross-origin. The default admits `moz-extension://` and `chrome-extension://`, no websites. |
 | `HF_TOKEN` | empty | Token for gated models. You can also save one in Settings, or rely on `huggingface-cli login` stored in `<MODELS_DIR>/hf/token`. |
 | `LLAMA_CPP_REF` | `ff0dbb975…` | llama.cpp commit, tag or branch to build. |
+| `AUDIO_CPP_REF` | `0097d365a…` | audio.cpp commit, tag or branch to build (the tag `v0.9.2`). `none` leaves audio.cpp out of the image and shortens the build. |
 
 Advanced, set in the `environment:` of `docker-compose.yml` if you need them: `KILN_SWAP_TIMEOUT` (900 s a
 request waits for a model to load), `KILN_DRAIN_TIMEOUT` (60 s running requests get before their model is
 stopped to make room), `KILN_STOP_TIMEOUT` (15 s before SIGKILL), `KILN_IDLE_CHECK_INTERVAL` (30 s between idle-timeout checks) and `KILN_INTERNAL_PORT` (8081; models
-take the next free port from here, and the tuner uses `KILN_INTERNAL_PORT + 100`).
+take the next free port from here, and the tuner uses `KILN_INTERNAL_PORT + 100`). For audio.cpp,
+`KILN_AUDIOCPP_SERVER` is the path to `audiocpp_server` (default `/app/audiocpp/audiocpp_server`), and
+`KILN_AUDIOCPP_LIB_DIR` is its libraries. The libraries are kept off the global `LD_LIBRARY_PATH`, so its ggml
+never mixes with llama.cpp's.
 
 The API port has no auth of its own. To require a key, add `--api-key …` to a preset; llama-server
 enforces it and Kiln passes the header through.
@@ -88,12 +92,27 @@ A model whose architecture is newer than your llama.cpp build fails to load with
 `unknown model architecture: '<name>'`, and no flag can fix that. Move `LLAMA_CPP_REF` to a commit at or
 after the one that added the architecture, then rebuild as above.
 
+## Upgrading audio.cpp
+
+```bash
+docker compose build --build-arg AUDIO_CPP_REF=v0.9.2   # or set AUDIO_CPP_REF in .env
+docker compose up -d
+```
+
+`AUDIO_CPP_REF` in `.env` overrides the default pinned in `docker-compose.yml` and the Dockerfile. The
+source is [github.com/0xShug0/audio.cpp](https://github.com/0xShug0/audio.cpp). Presets, stats and run
+history live in `./data/kiln.db` and are untouched by rebuilds.
+
+audio.cpp's model families and their GGUF layouts change between releases, so a model packaged for a newer
+audio.cpp may need a newer ref. Check the family's docs upstream before you move the ref.
+
 ## Data
 
 | Path | What |
 |---|---|
 | `data/kiln.db` | SQLite: presets, runs (with each model's measured GPU footprint), tuning runs, requests, GPU minutes, downloads, settings |
-| `data/logs/run-<id>.log` | Full llama-server output per run |
+| `data/audiocpp/port-<port>.json` | The config Kiln writes for each running audio model. See [Speech models](MULTI-MODEL.md#speech-models-audiocpp). |
+| `data/logs/run-<id>.log` | Full llama-server or audiocpp_server output per run |
 | `data/cache/` | Mesa shader cache |
 
 To back Kiln up, stop the container and copy the whole `data/` folder: the database keeps a write-ahead

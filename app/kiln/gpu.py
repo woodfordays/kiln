@@ -51,6 +51,7 @@ def _combine(cards: list[dict]) -> dict:
         "temp_c": max(temp) if temp else None,
         "sclk_mhz": sum(sclk) / len(sclk) if sclk else None,
         "gpus": len(cards),
+        "cards": [{"name": c.get("name"), "vram_used": c.get("vram_used"), "vram_total": c.get("vram_total")} for c in cards],
     }
 
 
@@ -130,7 +131,7 @@ class GpuSampler:
             temp = _read(h / "temp2_input") or _read(h / "temp1_input")  # junction, else edge
             sclk = _read(h / "freq1_input")
         return _combine([{
-            "busy": _read(d / "gpu_busy_percent"),
+            "name": self.name or None, "busy": _read(d / "gpu_busy_percent"),
             "vram_used": _read(d / "mem_info_vram_used"),
             "vram_total": _read(d / "mem_info_vram_total"),
             "power_w": power / 1e6 if power is not None else None,

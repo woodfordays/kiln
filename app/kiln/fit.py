@@ -12,7 +12,7 @@ import math
 import re
 from pathlib import Path
 
-from . import db, gpu, models
+from . import config, db, gpu, models, roles
 
 MIB = 1 << 20
 MARGIN_MIB = 512  # left free after loading: other processes, the desktop, the driver
@@ -27,6 +27,9 @@ ALIASES = {
     "ncmoe": ("-ncmoe", "--n-cpu-moe"), "cmoe": ("-cmoe", "--cpu-moe"), "mmproj": ("-mm", "--mmproj"),
     "device": ("-dev", "--device"), "mmproj_off": ("--no-mmproj-offload",), "no_mmproj": ("--no-mmproj", "--no-mmproj-auto"),
     "swa_full": ("--swa-full",),
+    "draft": ("-md", "--model-draft"), "ngld": ("-ngld", "--gpu-layers-draft", "--n-gpu-layers-draft"),
+    "ctxd": ("-cd", "--ctx-size-draft"), "ctkd": ("-ctkd", "--cache-type-k-draft"),
+    "ctvd": ("-ctvd", "--cache-type-v-draft"), "devd": ("-devd", "--device-draft"),
 }
 FLAG_ONLY = ("cmoe", "mmproj_off", "no_mmproj", "swa_full")
 
@@ -57,7 +60,10 @@ def _kv_bytes(name: str | None) -> float:
 
 
 def file_size(path: str) -> int:
+    """Bytes in a model file, all its shards, or every file under a package directory."""
     try:
+        if Path(path).is_dir():
+            return sum(f.stat().st_size for f in Path(path).rglob("*") if f.is_file())
         return sum(f.stat().st_size for f in models.files_for(path))
     except OSError:
         return 0
@@ -69,8 +75,24 @@ def signature(model: str, rows: list[dict], role: str) -> str:
     return hashlib.sha1(json.dumps([model, live, role]).encode()).hexdigest()[:16]
 
 
-def estimate(model: str, rows: list[dict]) -> dict:
+def estimate_audio(model: str, rows: list[dict]) -> dict:
+    """The same figures for an audio.cpp model: the files plus a fifth for activations, on the GPU unless --backend cpu."""
+    backend = next((str(r.get("value") or "") for r in rows
+                    if (r.get("flag") or "").strip() == "--backend" and r.get("enabled") is not False and r.get("value")),
+                   config.BACKEND)
+    size = file_size(model) * 1.2
+    on_gpu = backend.lower() != "cpu"
+    return {
+        "gpu_mib": round(size / MIB + PROCESS_MIB) if on_gpu else 0, "ram_mib": 0 if on_gpu else round(size / MIB),
+        "adaptive": False, "context": 0,
+        "parts": {"weights": round(size / MIB) if on_gpu else 0, "kv": 0, "compute": 0, "projector": 0},
+    }
+
+
+def estimate(model: str, rows: list[dict], role: str = "chat") -> dict:
     """MiB the model will want on the GPU (and in RAM) with these flags. All figures are estimates."""
+    if role in roles.AUDIO_ROLES:
+        return estimate_audio(model, rows)
     meta = models.info(model)
     eff = effective(rows)
     size = file_size(model)
@@ -108,12 +130,74 @@ def estimate(model: str, rows: list[dict]) -> dict:
 
     gpu_mib = (weights_gpu + kv_gpu + compute + mm) / MIB + (PROCESS_MIB if frac else 0)
     ram_mib = (size - weights_gpu + kv_total - kv_gpu) / MIB
+    ram_kv = (kv_total - kv_gpu) / MIB
     adaptive = str(eff.get("fit") or "on").lower() != "off" and ngl in ("", "auto") and not eff.get("ctx")
     return {
         "gpu_mib": round(gpu_mib), "ram_mib": round(ram_mib), "adaptive": adaptive, "context": ctx,
         "parts": {"weights": round(weights_gpu / MIB), "kv": round(kv_gpu / MIB),
                   "compute": round(compute / MIB), "projector": round(mm / MIB)},
+        "ram_parts": {"weights": round(ram_mib - ram_kv), "kv": round(ram_kv)},
     }
+
+
+GPU_KEYS = (("weights", "Weights"), ("mtp", "MTP head"), ("draft", "Draft model"), ("projector", "Projector"),
+            ("kv", "KV cache"), ("compute", "Compute buffer"), ("overhead", "Process overhead"))
+RAM_KEYS = (("weights", "Weights"), ("draft", "Draft model"), ("kv", "KV cache"))
+BUFFER_KEYS = {"model": "weights", "kv": "kv", "rs": "kv", "recurrent": "kv", "compute": "compute", "output": "compute"}
+
+
+def breakdown(model: str, rows: list[dict], buffers: dict | None = None, measured_mib: int | None = None) -> dict:
+    """Where the memory goes, in MiB: estimated segments on the GPU and in RAM, what llama.cpp reported
+    allocating (`buffers`, if the model is loaded), and per-GPU telemetry. estimate() is left as it was:
+    its totals don't count a draft model; the draft shows up here only."""
+    est, eff = estimate(model, rows), effective(rows)
+    meta, p = models.info(model), est["parts"]
+    gpu_seg = {k: 0 for k, _ in GPU_KEYS}
+    ram_seg = {k: 0 for k, _ in RAM_KEYS}
+    gpu_seg.update(weights=p["weights"], projector=p["projector"], kv=p["kv"], compute=p["compute"])
+    gpu_seg["overhead"] = est["gpu_mib"] - p["weights"] - p["projector"] - p["kv"] - p["compute"]
+    ram_seg.update(est["ram_parts"])
+    layers, nextn = int(meta.get("block_count") or 0), int(meta.get("nextn_layers") or 0)
+    if nextn > 0 and layers:  # the MTP layer's KV is already in kv; only its weights come out of the body
+        gpu_seg["mtp"] = round(p["weights"] * nextn / layers)
+        gpu_seg["weights"] -= gpu_seg["mtp"]
+    draft = str(eff.get("draft") or "")
+    if draft and Path(draft).exists():
+        ctx = eff.get("ctxd") or est["context"]
+        synth = [{"flag": f, "value": v} for f, v in (
+            ("-c", ctx), ("-ngl", eff.get("ngld") or eff.get("ngl")), ("-ctk", eff.get("ctkd") or "f16"),
+            ("-ctv", eff.get("ctvd") or "f16"), ("-dev", eff.get("devd")), ("-np", eff.get("np") or 1),
+            ("-ub", eff.get("ub")), ("--fit", "off")) if v not in (None, "")]
+        d = estimate(draft, synth)
+        dp = d["parts"]
+        gpu_seg["draft"] = dp["weights"] + dp["kv"] + dp["compute"]  # same process: no second overhead
+        ram_seg["draft"] = d["ram_mib"]
+    segs = lambda keys, seg: [{"key": k, "label": label, "mib": seg[k]} for k, label in keys]
+    return {
+        "context": est["context"], "np": _int(eff.get("np"), 1) or 1,
+        "ctk": str(eff.get("ctk") or "f16"), "ctv": str(eff.get("ctv") or "f16"),
+        "gpu": segs(GPU_KEYS, gpu_seg), "ram": segs(RAM_KEYS, ram_seg),
+        "gpu_mib": sum(gpu_seg.values()), "ram_mib": sum(ram_seg.values()),
+        "measured_mib": measured_mib, "actual": _actual(buffers), "devices": gpu_devices(),
+    }
+
+
+def _actual(buffers: dict | None) -> dict | None:
+    """llama.cpp's own buffer sizes ("Vulkan0 model" -> MiB) grouped by memory and by segment."""
+    if not buffers:
+        return None
+    out: dict = {"gpu": {}, "ram": {}, "devices": {}}
+    for key, mib in buffers.items():
+        dev, _, kind = key.rpartition(" ")
+        seg = BUFFER_KEYS.get(kind.lower())
+        if not seg:
+            continue
+        where = out["ram"] if dev.startswith("CPU") or "_Host" in dev else out["gpu"]
+        where[seg] = where.get(seg, 0) + round(mib)
+        if where is out["gpu"]:
+            d = out["devices"].setdefault(dev, {})
+            d[seg] = d.get(seg, 0) + round(mib)
+    return out
 
 
 def _kv_tokens(meta: dict, eff: dict, ctx: int, n_seq: int, ub: int) -> float:
@@ -168,6 +252,17 @@ def gpu_memory() -> dict | None:
             "used_mib": round(s["vram_used"] / MIB)}
 
 
+def gpu_devices() -> list[dict]:
+    """Per-GPU total/used/free VRAM in MiB from the newest telemetry sample; [] without telemetry."""
+    s = gpu.sampler.live[-1] if gpu.sampler.live else None
+    cards = (s or {}).get("cards")
+    if s and not cards and (mem := gpu_memory()):
+        cards = [{"name": gpu.sampler.name or None, "vram_used": mem["used_mib"] * MIB, "vram_total": mem["total_mib"] * MIB}]
+    return [{"name": c.get("name"), "total_mib": round(c["vram_total"] / MIB), "used_mib": round(c["vram_used"] / MIB),
+             "free_mib": round((c["vram_total"] - c["vram_used"]) / MIB)}
+            for c in cards or [] if c.get("vram_total") is not None and c.get("vram_used") is not None]
+
+
 def ram_available_mib() -> int | None:
     try:
         for line in Path("/proc/meminfo").read_text().splitlines():
@@ -186,7 +281,7 @@ def measured_mib(sig: str) -> int | None:
 def check(model: str, rows: list[dict], role: str, reclaim_mib: int = 0, reserved_mib: int = 0) -> dict:
     """Would this launch fit, counting `reclaim_mib` freed by models that would be stopped first and
     setting aside `reserved_mib` that models still loading have yet to take?"""
-    est = estimate(model, rows)
+    est = estimate(model, rows, role)
     sig = signature(model, rows, role)
     measured = measured_mib(sig)
     need = measured if measured is not None else est["gpu_mib"]

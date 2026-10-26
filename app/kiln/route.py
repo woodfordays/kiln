@@ -8,6 +8,9 @@ from . import models
 from .roles import ENDPOINT_ROLE
 
 
+AUDIO_REASON = {"tts": "No text-to-speech model is loaded.", "stt": "No speech-to-text model is loaded."}
+
+
 @dataclass
 class Route:
     kind: str  # "instance" (use it, wait for it if still loading) | "swap" (load a preset first) | "none"
@@ -77,6 +80,8 @@ def resolve(name: str | None, path: str, instances: list, presets: list[dict], s
                 return Route("swap", preset=max(ps, key=lambda p: p.get("last_started") or 0))
         if want == "decision":
             return Route("none", reason="No decision model is loaded.")
+        if want in AUDIO_REASON:
+            return Route("none", reason=AUDIO_REASON[want])
         # embeddings and reranking fall through to the default model, which answers or explains
     chat = [i for i in usable if i.role == "chat"]
     if chat:

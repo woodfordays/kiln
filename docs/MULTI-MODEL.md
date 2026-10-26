@@ -1,29 +1,34 @@
 # Running several models
 
-Kiln runs each model as its own `llama-server` process, so a chat model can sit next to an embedding
-model, a reranker or a decision model when they fit in GPU memory. This page covers how requests find
-the right model, how Kiln decides whether another model fits, loading models on demand, idle unloading,
-decision models, and the extra files (vision projectors, speculative-decoding drafts) that come with some
-models. For the screens that control all this, see the [user guide](GUIDE.md).
+Kiln runs each model as its own process: `llama-server` for llama.cpp models, and `audiocpp_server` for speech
+models. A chat model can sit next to an embedding model, a reranker, a decision model or a speech model when
+they fit in GPU memory. This page covers how requests find the right model, how Kiln decides whether another
+model fits, loading models on demand, idle unloading, decision models, speech models, and the extra files
+(vision projectors, speculative-decoding drafts) that come with some models. For the screens that control all this, see the [user guide](GUIDE.md).
 
 ## Routing, fit and swapping
 
-Each running model is its own `llama-server` process on its own internal port. The API port routes
-every request:
+Each running model is its own process (`llama-server`, or `audiocpp_server` for speech) on its own internal
+port. The API port routes every request:
 
 1. **By name.** The request's `model` field is matched, ignoring case, against a running model's API
    name (set on the preset, otherwise its name), the preset name, its slug, any `--alias` flag, and
    finally the model file's name. `X-Kiln-Model: <name>` or `?model=<name>` works too, and every response
    says which model answered in `X-Kiln-Model`.
 2. **By endpoint.** `/v1/embeddings` goes to the embedding model, `/v1/rerank` to the reranker,
-   `/v1/systemone` to the decision model.
+   `/v1/systemone` to the decision model, `/v1/audio/speech` to the text-to-speech model, and
+   `/v1/audio/transcriptions` (and `/details`), `/v1/audio/alignments` to the speech-to-text model.
+   Unlike embeddings, the audio paths never fall through to the chat model: with none loaded the answer is
+   503 `No text-to-speech model is loaded.` (or `No speech-to-text model is loaded.`). A name that matches
+   nothing (`tts-1`, `whisper-1`) goes to the newest model of that role, loading its preset first if swapping
+   is on.
 3. **Otherwise** to the chat model used last. A name that matches nothing (`gpt-4o`, `default`) falls
    through to that, as before, so existing clients keep working.
 
 `GET /v1/models` lists what is loaded, and (with swapping on) every preset that could be.
 
-**A preset has a role**: *Chat*, *Embeddings* (Kiln adds `--embeddings`), *Reranker* (`--rerank`) or
-*Decision*. The role decides the flags Kiln adds and which paths the model serves; the Server page shows
+**A preset has a role**: *Chat*, *Embeddings* (Kiln adds `--embeddings`), *Reranker* (`--rerank`), *Decision*,
+*Text to speech* or *Speech to text*. The role decides the flags Kiln adds and which paths the model serves; the Server page shows
 the exact command line. New presets pick the role from the model (the library marks embedding, reranker
 and decision models). A preset can also be **pinned**, so it is never stopped to make room.
 
@@ -36,6 +41,10 @@ to +11% of the VRAM actually used, 1.6% high on average. If it doesn't fit, Star
 unpinned models (least recently used first), or to start anyway. `--fit on`, llama.cpp's default,
 shrinks a model to whatever is free instead of refusing; add `--fit off` for exact settings. Without
 GPU telemetry Kiln can't check and starts the model.
+
+Audio models are estimated from their file size (a package directory is summed) plus a fifth, on the GPU
+unless the preset has `--backend cpu`. After the first load the measured footprint replaces the estimate, as
+for llama models.
 
 **Swap on request** (Settings, on by default). When a request names a preset that isn't running, Kiln
 loads it first: it waits for running requests on a model to finish (up to 60 s) before stopping it to
@@ -101,6 +110,51 @@ gives the call as curl, Python or JavaScript.
     it is not the reference implementation. Treat probabilities from here as unverified against Perplexity's.
   - The whole prompt must fit the context (`-c`, 4096 unless you set it). `llama-server` returns one
     vector per token, so very long states are slow and use memory.
+
+## Speech models (audio.cpp)
+
+[audio.cpp](https://github.com/0xShug0/audio.cpp) runs the speech models: text to speech and speech to
+text. Its server is `audiocpp_server`, which the image builds next to `llama-server`
+([Upgrading audio.cpp](CONFIGURATION.md#upgrading-audiocpp)). Each audio preset runs its own
+`audiocpp_server` with a one-model config that Kiln writes to `data/audiocpp/port-<port>.json`. For the HTTP
+contract, see [API.md → Audio endpoints](API.md#audio-endpoints).
+
+The preset's model can be a GGUF file or a package directory. Some families, such as `kokoro_tts` or
+`pocket_tts`, ship a directory. The model library only lists `.gguf` files, so type a package directory's
+path into the preset by hand.
+
+The preset rows Kiln maps into the config:
+
+| Row | Config | Notes |
+|---|---|---|
+| `--family NAME` | `family` | Required. Kiln won't start the preset without it. |
+| `--task NAME` | `task` | Default `tts` for the Text to speech role, `asr` for Speech to text. |
+| `--mode offline\|streaming` | `mode` | Default `offline`. |
+| `--device N` | `device` | |
+| `--threads N` | top-level `threads` | |
+| `--voice NAME` | `default_voice_preset` | Sent as `{"voice_id": NAME}`. |
+| `--backend NAME` | top-level `backend` | Default from `KILN_BACKEND` (`vulkan` or `cuda`). `cpu` is allowed. |
+| `--load-option key=value` | `load_options` | Repeatable. |
+| `--session-option key=value` | `session_options` | Repeatable. |
+| `--request-option key=value` | `default_request_options` | Repeatable. |
+
+Every other enabled row goes on `audiocpp_server`'s command line as it is, for example `--busy-timeout-ms`
+or `--voice-dir`. `--config`, `--host`, `--port`, `--ui`, `--no-ui`, `-m` and `--model` belong to Kiln, so a
+row for one of them is ignored.
+
+Two example presets:
+
+- **Kokoro, role *Text to speech*:** `--family kokoro_tts` and `--voice af_heart`. The voice is illustrative;
+  use a voice the model ships. The 190 MB `kokoro-82m-q8_0.gguf` from `audio-cpp/audio.cpp-gguf` on Hugging Face
+  runs fine on the CPU (`--backend cpu`). Kokoro and Piper turn text into phonemes with eSpeak-ng, which Kiln's
+  image installs (`libespeak-ng1`); an image built before that fails with "Could not load eSpeak-ng".
+- **Qwen3-ASR, role *Speech to text*:** `--family qwen3_asr`.
+
+Notes:
+
+- Uploads must be WAV, unless audio.cpp was built with its audio-decode frontend. Kiln's image isn't.
+- The tuner and the memory estimator's detailed breakdown are for llama.cpp models only.
+- Kiln rewrites the request's `model` to the preset's API name (its alias, else its name), which is the id in the config it wrote, so clients can send any name.
 
 ## Speculative decoding and other model files
 

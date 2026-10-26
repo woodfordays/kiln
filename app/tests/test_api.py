@@ -5,7 +5,7 @@ import unittest.mock
 
 import httpx
 
-from kiln import api, db, hf
+from kiln import api, db, fit, hf
 from kiln.server import manager
 from . import ROOT
 from .helpers import fake_gpu, llm, make_preset
@@ -118,6 +118,28 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ok.status_code, 200, ok.text)
         await self.wait(ok.json()["started"]["run_id"])
         self.assertEqual([i.name for i in manager.live()], ["beta"])
+
+    async def test_breakdown_and_slots(self):
+        self.stack.enter_context(unittest.mock.patch.object(fit, "gpu_memory", return_value={"total_mib": 24000, "free_mib": 24000, "used_mib": 0}))
+        p = await self.preset("alpha", flags=[{"flag": "-np", "value": "2"}, {"flag": "-c", "value": "4096"}])
+        pre = await self.http.post("/api/fit/breakdown", json={"preset_id": p["id"]})
+        self.assertEqual((pre.json()["np"], pre.json()["context"]), (2, 4096))
+        over = await self.http.post("/api/fit/breakdown", json={"preset_id": p["id"], "flags": [{"flag": "-c", "value": "2048"}]})
+        self.assertEqual((over.json()["np"], over.json()["context"]), (1, 2048))
+        self.assertEqual((await self.http.post("/api/fit/breakdown", json={})).status_code, 400)
+        self.assertEqual((await self.http.get("/api/server/breakdown")).status_code, 404)
+        self.assertEqual((await self.http.get("/api/server/slots")).json(), {"instances": []})
+        run = (await self.start(p["id"])).json()["started"]["run_id"]
+        await self.wait(run)
+        live = (await self.http.get(f"/api/server/breakdown?run_id={run}")).json()
+        self.assertEqual((live["run_id"], live["name"], live["state"]), (run, "alpha", "ready"))
+        self.assertEqual(live["actual"]["gpu"]["weights"], 1234)
+        self.assertEqual(live["actual"]["ram"]["weights"], 50)
+        slots = (await self.http.get("/api/server/slots")).json()["instances"][0]
+        self.assertEqual((slots["run_id"], slots["error"], len(slots["slots"])), (run, None, 2))
+        self.assertEqual(slots["slots"][0]["n_ctx"], 2048)
+        self.assertTrue(slots["slots"][0]["processing"] and not slots["slots"][1]["processing"])
+        self.assertEqual(set(slots["slots"][0]), {"id", "n_ctx", "used", "processing", "decoded"})
 
     async def test_plan_and_force(self):
         self.gpu(total=7000, per_model=6000)
@@ -253,9 +275,37 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("autostart_preset_id", db.get_settings())
         db.set_settings({"autostart_preset_ids": []})
 
+    async def test_audio_calls_pass_through_to_the_api_port(self):
+        from fastapi import FastAPI, Request, Response
+        seen = []
+        fake = FastAPI()
+
+        @fake.post("/v1/audio/{kind}")
+        async def echo(kind: str, request: Request):
+            seen.append((kind, request.headers["content-type"], await request.body()))
+            if kind == "speech":
+                return Response(b"RIFF....WAVE", media_type="audio/wav", headers={"x-kiln-model": "tts"})
+            return {"text": "hello"}
+
+        @fake.get("/v1/audio/voices")
+        async def voices(model: str = ""):
+            return {"voices": ["af_heart"], "model": model}
+
+        with unittest.mock.patch.object(api.proxy, "app", fake):
+            r = await self.http.post("/api/audio/speech", json={"input": "hi"})
+            self.assertEqual((r.status_code, r.headers["content-type"], r.content), (200, "audio/wav", b"RIFF....WAVE"))
+            self.assertEqual(r.headers["x-kiln-model"], "tts")
+            r = await self.http.post("/api/audio/transcriptions", files={"file": ("a.wav", b"abc", "audio/wav")}, data={"model": "w"})
+            self.assertEqual(r.json(), {"text": "hello"})
+            self.assertTrue(seen[1][1].startswith("multipart/form-data; boundary="))
+            self.assertIn(b'name="file"; filename="a.wav"', seen[1][2])
+            self.assertEqual((await self.http.post("/api/audio/translations", json={})).status_code, 404)
+            self.assertEqual((await self.http.get("/api/audio/voices?model=kokoro")).json(), {"voices": ["af_heart"], "model": "kokoro"})
+        self.assertEqual(seen[0][:2], ("speech", "application/json"))
+
     async def test_roles_endpoint(self):
         roles = (await self.http.get("/api/roles")).json()
-        self.assertEqual(set(roles), {"chat", "embedding", "rerank", "decision"})
+        self.assertEqual(set(roles), {"chat", "embedding", "rerank", "decision", "tts", "stt"})
         self.assertIn("--embeddings", roles["embedding"]["adds"])
 
 

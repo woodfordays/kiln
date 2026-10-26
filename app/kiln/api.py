@@ -10,10 +10,11 @@ import os
 import re
 import secrets
 import time
+from urllib.parse import quote
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -181,6 +182,47 @@ async def server_plan(body: StartBody):
     return manager.plan(a["model"], a["rows"], a["preset"], a["role"], a["replace"])
 
 
+@app.post("/api/fit/breakdown")
+async def fit_breakdown(body: StartBody):
+    """Estimated memory segments for a launch; unsaved flags in the body win over a preset's."""
+    a = _launch_args(body)
+    if not a["model"]:
+        raise ValueError("Pick a model first.")
+    return fit.breakdown(a["model"], body.flags or a["rows"])
+
+
+@app.get("/api/server/breakdown")
+async def server_breakdown(run_id: int | None = None):
+    """The memory breakdown of a running server (the primary one without run_id), with what llama.cpp allocated."""
+    inst = manager.get(run_id) if run_id is not None else manager.primary()
+    if not inst:
+        raise LookupError("No server is running.")
+    return {**fit.breakdown(inst.model_path, inst.rows, inst.buffers, inst.gpu_mib),
+            "run_id": inst.run_id, "name": inst.name, "state": inst.state}
+
+
+@app.get("/api/server/slots")
+async def server_slots():
+    """Context use per slot of every ready server, read from each llama-server's /slots."""
+    async def one(inst):
+        out = {"run_id": inst.run_id, "name": inst.name, "state": inst.state, "n_ctx": inst.props.get("n_ctx"), "slots": [], "error": None}
+        inst.begin(touch=False)
+        try:
+            r = await inst._client.get("/slots", timeout=2)
+            if r.status_code != 200:
+                out["error"] = "Slot info is disabled (--no-slots)." if r.status_code in (404, 501) else f"HTTP {r.status_code}"
+            else:
+                out["slots"] = [{"id": s.get("id"), "n_ctx": s.get("n_ctx"), "used": s.get("n_prompt_tokens") or 0,
+                                 "processing": bool(s.get("is_processing")),
+                                 "decoded": ((s.get("next_token") or [{}])[0].get("n_decoded") or 0)} for s in r.json()]
+        except (httpx.HTTPError, ValueError, AttributeError) as e:
+            out["error"] = str(e) or type(e).__name__
+        finally:
+            inst.end(touch=False)
+        return out
+    return {"instances": list(await asyncio.gather(*(one(i) for i in manager.instances.values() if i.state == "ready")))}
+
+
 class RunBody(BaseModel):
     run_id: int | None = None  # none = every server
 
@@ -251,6 +293,30 @@ async def decide(request: Request):
         r = await c.post("/v1/systemone", content=await request.body(), headers={"content-type": "application/json"})
     headers = {"X-Kiln-Model": r.headers["x-kiln-model"]} if "x-kiln-model" in r.headers else {}
     return Response(r.content, status_code=r.status_code, media_type="application/json", headers=headers)
+
+
+@app.post("/api/audio/{kind}")
+async def audio(kind: str, request: Request):
+    """The Audio page's Generate and Transcribe buttons, passed to the API port's /v1/audio/speech and
+    /v1/audio/transcriptions the same way /api/decide is: routed and recorded like any client's call, and the
+    page needs no cross-origin access to the API port. The body (JSON or multipart) goes through untouched."""
+    if kind not in ("speech", "transcriptions"):
+        raise HTTPException(404, "Not found")
+    transport = httpx.ASGITransport(app=proxy.app, client=("kiln-ui", 0))
+    async with httpx.AsyncClient(transport=transport, base_url="http://kiln", timeout=None) as c:
+        r = await c.post(f"/v1/audio/{kind}", content=await request.body(),
+                         headers={"content-type": request.headers.get("content-type", "application/octet-stream")})
+    headers = {"X-Kiln-Model": r.headers["x-kiln-model"]} if "x-kiln-model" in r.headers else {}
+    return Response(r.content, status_code=r.status_code, media_type=r.headers.get("content-type"), headers=headers)
+
+
+@app.get("/api/audio/voices")
+async def audio_voices(model: str = ""):
+    """The voices a text-to-speech model offers, for the Audio page's voice picker."""
+    transport = httpx.ASGITransport(app=proxy.app, client=("kiln-ui", 0))
+    async with httpx.AsyncClient(transport=transport, base_url="http://kiln", timeout=30) as c:
+        r = await c.get("/v1/audio/voices", params={"model": model} if model else None)
+    return Response(r.content, status_code=r.status_code, media_type=r.headers.get("content-type"))
 
 
 @app.get("/api/runs")
@@ -579,6 +645,7 @@ class TuneBody(BaseModel):
     mode: str = "grid"
     kv_policy: str = "precise"
     vary_batch: bool = False
+    space: dict | None = None  # per-dimension modes and values, see kiln/tunespace.py
 
 
 @app.post("/api/tune")
@@ -675,6 +742,34 @@ async def event_stream(request: Request):
 @app.get("/")
 async def index():
     return FileResponse(config.WEB_DIR / "index.html", headers={"Cache-Control": "no-cache"})
+
+
+# llama-server's own chat page, same-origin under /chat/<model>/ so it works wherever Kiln's UI does:
+# behind an HTTPS reverse proxy, under a path prefix, or on plain HTTP. Its page uses relative URLs
+# (./_app/..., ./v1/chat/completions, ./props), so everything below the model segment goes to that
+# model's llama-server. Redirects are relative too, so they keep the scheme, host and prefix.
+
+@app.get("/chat")
+async def chat_root():
+    return RedirectResponse("chat/", status_code=307)
+
+
+@app.get("/chat/")
+async def chat_default(request: Request):
+    name = proxy.chat_default()
+    if not name:
+        return proxy._offline(request, ui="../")
+    return RedirectResponse(f"./{quote(name, safe='')}/", status_code=307)
+
+
+@app.api_route("/chat/{model}", methods=["GET", "HEAD"])
+async def chat_model_root(model: str):
+    return RedirectResponse(f"{quote(model, safe='')}/", status_code=307)
+
+
+@app.api_route("/chat/{model}/{rest:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"])
+async def chat_passthrough(request: Request, model: str, rest: str):
+    return await proxy.handle(request, "/" + rest, model=model, ui="../" * (rest.count("/") + 2))
 
 
 app.mount("/", StaticFiles(directory=config.WEB_DIR), name="web")
