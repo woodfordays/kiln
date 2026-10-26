@@ -145,7 +145,9 @@ row for one of them is ignored.
 Two example presets:
 
 - **Kokoro, role *Text to speech*:** `--family kokoro_tts` and `--voice af_heart`. The voice is illustrative;
-  use a voice the model ships.
+  use a voice the model ships. The 190 MB `kokoro-82m-q8_0.gguf` from `audio-cpp/audio.cpp-gguf` on Hugging Face
+  runs fine on the CPU (`--backend cpu`). Kokoro and Piper turn text into phonemes with eSpeak-ng, which Kiln's
+  image installs (`libespeak-ng1`); an image built before that fails with "Could not load eSpeak-ng".
 - **Qwen3-ASR, role *Speech to text*:** `--family qwen3_asr`.
 
 Notes:

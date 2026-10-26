@@ -108,6 +108,11 @@ kiln.example.com {
 | `401` from `:8080`. | The preset has `--api-key …` and the request has no matching key. Kiln passes the header through. |
 | `401` from `:8090/api`. | `KILN_UI_PASSWORD` is on. Use Basic auth (user `kiln`), or `Authorization: Bearer <KILN_API_TOKEN>`. |
 
+## Text to speech says "Could not load eSpeak-ng"
+
+Kokoro and Piper need the eSpeak-ng library, which Kiln's image installs. The image was built before that
+was added: rebuild it (`docker compose build`). Outside Docker, install `libespeak-ng1` and `espeak-ng-data`.
+
 ## Downloads
 
 | Message | Meaning |

@@ -143,14 +143,17 @@ RUN if [ "${AUDIO_CPP_REF}" = "none" ]; then mkdir -p /out; else \
 
 # ---------------------------------------------------------------- runtime bases
 FROM docker.io/ubuntu:${UBUNTU_VERSION} AS base-vulkan
+# libespeak-ng1: audio.cpp's Kokoro (and Piper) turn text into phonemes with eSpeak-ng, loaded at run time.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libvulkan1 mesa-vulkan-drivers libgomp1 libssl3t64 curl ca-certificates python3 python3-venv \
+        libespeak-ng1 espeak-ng-data \
     && rm -rf /var/lib/apt/lists/*
 ENV XDG_CACHE_HOME=/data/cache MESA_SHADER_CACHE_DIR=/data/cache/mesa
 
 FROM docker.io/nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu${CUDA_UBUNTU_VERSION} AS base-cuda
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libgomp1 libssl3t64 curl ca-certificates python3 python3-venv \
+        libespeak-ng1 espeak-ng-data \
     && rm -rf /var/lib/apt/lists/*
 # The NVIDIA container toolkit mounts the driver and nvidia-smi (used for GPU telemetry).
 ENV NVIDIA_VISIBLE_DEVICES=all NVIDIA_DRIVER_CAPABILITIES=compute,utility \
