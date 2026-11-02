@@ -38,7 +38,8 @@ def _headers() -> dict:
 
 
 def parse_ref(text: str) -> dict:
-    """Accept org/repo, org/repo:QUANT, or a huggingface.co URL (repo, tree, blob or resolve)."""
+    """Accept org/repo, org/repo:QUANT, or a huggingface.co/hf.co URL (repo, tree, blob or resolve);
+    links may carry :QUANT after the repo name, as Hugging Face's "Use this model" shows."""
     s = text.strip()
     out = {"repo": "", "revision": "main", "quant": "", "file": ""}
     if re.match(r"^(https?://)?(www\.)?(huggingface\.co|hf\.co)/", s):
@@ -47,7 +48,11 @@ def parse_ref(text: str) -> dict:
         parts = [p for p in urlparse(s).path.split("/") if p]
         if len(parts) < 2:
             raise ValueError("That link doesn't name a model repository.")
-        out["repo"] = f"{parts[0]}/{parts[1]}"
+        repo = parts[1]
+        m = re.fullmatch(r"([\w.\-]+):([\w.\-]+)", repo)
+        if m:
+            repo, out["quant"] = m.group(1), m.group(2)
+        out["repo"] = f"{parts[0]}/{repo}"
         if len(parts) >= 4 and parts[2] in ("blob", "resolve", "tree"):
             out["revision"] = parts[3]
             if parts[2] in ("blob", "resolve") and len(parts) > 4:

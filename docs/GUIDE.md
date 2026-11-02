@@ -219,7 +219,8 @@ Models live under `MODELS_DIR`. Kiln lists the GGUF files it finds there, includ
 ![Models page: finding files and the download queue](screenshots/models.png)
 
 **Download from Hugging Face.** Enter `org/repo`, `org/repo:Q4_K_M` (llama.cpp's own form) or a huggingface.co
-link, and press **Find files**. The repository's GGUF files appear sorted by size, with split models grouped into
+link — a link may also carry `:Q4_K_M` after the repo name, as the Hub's "Use this model" shows — and
+press **Find files**. The repository's GGUF files appear sorted by size, with split models grouped into
 one row and vision projectors and draft models labelled. The quant you named is preselected and scrolled into
 view, and files you already have are marked **On disk**. Tick one or more and press **Download**.
 

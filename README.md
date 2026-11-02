@@ -23,8 +23,9 @@ requests, speeds, tuning results and GPU readings are sample data made up to sho
 - **Presets**: a model plus flags and environment variables. The editor autocompletes and explains every flag
   the compiled `llama-server` reports in `--help`, and can import a command you already use. Vision, MTP and
   draft files such as DSpark switch on and off with a click and keep their flags.
-- **Hugging Face downloads**: enter `org/repo`, `org/repo:Q4_K_M` or a huggingface.co link, pick a quant (split
-  files and vision projectors are grouped for you), and watch it download with resume support.
+- **Hugging Face downloads**: enter `org/repo`, `org/repo:Q4_K_M` or a huggingface.co link (a `:Q4_K_M` after the
+  repo name works in any of these), pick a quant (split files and vision projectors are grouped for you), and
+  watch it download with resume support.
 - **Tuner**: pick a model, a target context and what to optimize for, and Kiln measures flag combinations (KV
   cache type, flash attention, batch size, MTP speculative decoding, or how much of the model to keep in system
   RAM) with a fixed, greedy benchmark, and saves the winner as a preset.
