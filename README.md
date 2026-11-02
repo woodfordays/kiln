@@ -28,6 +28,8 @@ requests, speeds, tuning results and GPU readings are sample data made up to sho
 - **Tuner**: pick a model, a target context and what to optimize for, and Kiln measures flag combinations (KV
   cache type, flash attention, batch size, MTP speculative decoding, or how much of the model to keep in system
   RAM) with a fixed, greedy benchmark, and saves the winner as a preset.
+- **Audio**: turn text into speech with Kokoro or Piper (served by audio.cpp), transcribe a recording or file,
+  or run the two as a round trip, with both calls ready to copy.
 - **Dashboard**: decode and prefill speed, time to first token, decode speed by context depth, tokens per period,
   draft acceptance for speculative decoding, GPU VRAM, power and load, per-model breakdowns and all-time totals.
   Every request is stored in SQLite under `./data`, so the history survives restarts, rebuilds and upgrades.
