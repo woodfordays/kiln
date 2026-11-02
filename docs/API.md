@@ -510,7 +510,7 @@ with `enabled: false` stays in the preset but isn't passed to llama-server. Flag
 |---|---|---|---|
 | GET | `/api/models` | | `{models, roots, download_dir}`. Each model: path, name, repo, size, quant, arch, context length, `is_projector`, `is_draft`, `role_hint`, `decision`, and for a main model its `projectors` and `drafts` (DSpark, DFlash, EAGLE-3 files), … |
 | DELETE | `/api/models` | `?path=` | `{removed: [paths]}`. `409` if that model is loaded. |
-| GET | `/api/hf/resolve` | `?id=org/repo[:QUANT]` or a huggingface.co URL | `{repo, revision, gated, has_token, selected, variants, …}`: the downloadable quants |
+| GET | `/api/hf/resolve` | `?id=org/repo[:QUANT]` or a huggingface.co URL (a link may also carry `:QUANT` after the repo name) | `{repo, revision, gated, has_token, selected, variants, …}`: the downloadable quants |
 | GET | `/api/downloads` | | The last 50 download rows, newest first |
 | POST | `/api/downloads` | `repo`, `variant`, `files: [{path, size}]`, `revision="main"` | `{id}`. `507` if the disk is too small. |
 | POST | `/api/downloads/{id}/cancel` | | `{ok}` |

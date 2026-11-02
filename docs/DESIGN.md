@@ -140,7 +140,8 @@ model and flags. One preset can be marked to autostart when the container starts
 
 ### Model downloads
 
-Input accepts `org/repo`, `org/repo:Q4_K_M` (llama.cpp's `-hf` form), or a huggingface.co URL.
+Input accepts `org/repo`, `org/repo:Q4_K_M` (llama.cpp's `-hf` form), or a huggingface.co URL,
+with an optional `:Q4_K_M` after the repo name in any form.
 Kiln lists the repo's GGUF files through the Hub API, groups split shards
 (`-00001-of-00003.gguf`) and quant subfolders into variants, flags `mmproj` projectors, and
 preselects the quant you named. Downloads stream with `httpx` to `*.part` files, resume with
