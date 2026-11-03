@@ -113,6 +113,8 @@ class Tuner:
         self.threads_used: int | None = None  # the thread count llama-server logged: its own choice unless -t was given
         self._filler_ids: list[int] | None = None
         self._task_ids: list[int] | None = None
+        self._batch: dict | None = None  # {"previous", "winners"} while a batch of runs holds the GPU
+        self._paused = False             # True after shutdown(): nothing new starts
 
     # ------------------------------------------------------------ public
 
@@ -121,7 +123,8 @@ class Tuner:
         return self.task is not None and not self.task.done()
 
     def status(self) -> dict:
-        return {"running": self.running, "tune_id": self.tune_id, "stage": self.stage, "trial": self.trial_label}
+        return {"running": self.running, "tune_id": self.tune_id, "stage": self.stage, "trial": self.trial_label,
+                "queued": db.scalar("SELECT COUNT(*) FROM tunes WHERE status='queued'") or 0}
 
     def live(self) -> dict:
         """The status plus the stage plan: what the Tuner page shows while a run is going."""
@@ -135,8 +138,19 @@ class Tuner:
         self._publish()
 
     async def start(self, params: dict) -> int:
-        if self.running:
-            raise RuntimeError("A tuning run is already in progress.")
+        """Validate and queue a run; it starts now when nothing is running, otherwise after the
+        queued ones. Returns the tune id."""
+        p = self._prepare(params)
+        tid = db.insert("tunes", {
+            "created_at": time.time(), "status": "queued", "model": p["model"],
+            "params": json.dumps(p), "trials": "[]",
+        })
+        self._publish_row(tid)
+        if not self.running and not self._paused:
+            await self._next()
+        return tid
+
+    def _prepare(self, params: dict) -> dict:
         model = params.get("model") or ""
         if not os.path.exists(model):
             raise FileNotFoundError(f"Model file not found: {model}")
@@ -181,37 +195,87 @@ class Tuner:
         tunespace.check({"objective": params["objective"], "mode": params["mode"], "kv_policy": params["kv_policy"],
                          "vary_batch": bool(params.get("vary_batch")), "space": space, "kv_ladder": KV_LADDER,
                          "ubatches": UBATCHES, "spec_groups": _spec_groups(params)})
+        return params
 
-        previous = manager.snapshot() or None  # everything running now comes back afterwards
-        params["previous"] = previous
-
-        self.tune_id = db.insert("tunes", {
-            "created_at": time.time(), "status": "running", "model": model,
-            "params": json.dumps(params), "trials": "[]",
-        })
+    def _begin(self, tid: int, p: dict) -> None:
+        """Mark one queued row running and create its task. Synchronous on purpose: between picking
+        the row and creating the task nothing may await, or two start() calls at once could both begin."""
+        opening = self._batch is None
+        if opening:
+            self._batch = {"previous": manager.snapshot() or None, "winners": {}}  # everything running now comes back after the last one
+        p["previous"] = self._batch["previous"]
+        db.update("tunes", tid, {"status": "running", "started_at": time.time(), "params": json.dumps(p)})
+        self.tune_id = tid
         self.cancelled = False
         self._filler_ids = None
-        self.plan = _plan(params)
+        self.plan = _plan(p)
         manager.blocked = "Kiln is tuning flags. The server is unavailable until it finishes or you cancel it."
-        if previous:
-            await manager.stop()  # the tuner needs the whole GPU
-        self.task = asyncio.create_task(self._run(self.tune_id, params))
+        self.task = asyncio.create_task(self._run(tid, p, stop_first=opening and bool(self._batch["previous"])))
         self._publish()
-        return self.tune_id
+
+    async def _next(self) -> None:
+        """Start the oldest queued run; with none left, end the batch. Call only when nothing is running
+        (from start()/resume() after checking self.running, or as the last thing _run does)."""
+        while not self._paused:
+            row = db.row("SELECT id, params FROM tunes WHERE status='queued' ORDER BY id LIMIT 1")
+            if row:
+                self._begin(row["id"], json.loads(row["params"]))
+                return
+            if self._batch is None:
+                return
+            await self._end_batch()  # slow (restarts models); a run queued meanwhile is picked up by the loop
+
+    def remove(self, tid: int) -> None:
+        row = db.row("SELECT id, status FROM tunes WHERE id=?", (tid,))
+        if not row:
+            raise LookupError("No such tuning run.")
+        if row["status"] != "queued":
+            raise RuntimeError("Only a queued run can be removed. Cancel the running one instead.")
+        db.execute("DELETE FROM tunes WHERE id=?", (tid,))
+        events.publish("tune", {"id": tid, "removed": True})
+
+    def clear_queue(self) -> int:
+        rows = db.rows("SELECT id FROM tunes WHERE status='queued'")
+        for r in rows:
+            self.remove(r["id"])
+        return len(rows)
 
     async def cancel(self) -> None:
         if self.running:
             self.cancelled = True
             await self._kill()
 
+    async def shutdown(self) -> None:
+        """Container stopping: pause the queue, cancel the running run and wait for it. The queued
+        rows stay for the next boot (db.init marks the cancelled one interrupted, not the queue)."""
+        self._paused = True
+        await self.cancel()
+        await self.wait_idle()
+
+    async def resume(self) -> None:
+        """Back up after a restart: unpause, and start the oldest queued run if nothing is going."""
+        self._paused = False
+        if not self.running:
+            await self._next()
+
+    async def wait_idle(self) -> None:
+        """Return when nothing is running; a queue drains first, because each run creates the next
+        run's task before its own task finishes."""
+        while self.running:
+            await self.task
+
     # ------------------------------------------------------------ the search
 
-    async def _run(self, tid: int, p: dict) -> None:
+    async def _run(self, tid: int, p: dict, stop_first: bool = False) -> None:
+        if stop_first:
+            await manager.stop()  # the tuner needs the whole GPU (the first run of a batch only)
         trials: list[dict] = []
         cache: dict[str, dict] = {}
         error = None
         best = None
         try:
+            if not os.path.exists(p["model"]):
+                raise FileNotFoundError(f"Model file not found: {p['model']}")  # it may have been deleted while queued
             space = p.get("space") or {}
             cfg = {"ngl": "99", "ctx": str(p["ctx"]), "np": "1", "fa": "on", "ctk": "f16", "ctv": "f16",
                    "ub": "512", "b": "2048", **NO_SPEC, "ncmoe": None, "threads": None, "threads_batch": None,
@@ -381,26 +445,37 @@ class Tuner:
             await self._kill()
             self.stage, self.trial_label = "", ""
             self.plan = []
-            manager.blocked = None
-            await self._after(p, best)
+            if best and p.get("start_after") and self._batch is not None:
+                row = db.row("SELECT preset_id FROM tunes WHERE id=?", (tid,))
+                if row and row["preset_id"]:
+                    self._batch["winners"][p["model"]] = row["preset_id"]  # a later winner for the same model replaces an earlier one
             self._publish()
             events.publish("presets", {"changed": True})
+        await self._next()
 
-    async def _after(self, p: dict, best: dict | None) -> None:
-        """Start the winner if asked, and bring back what was running before."""
+    async def _end_batch(self) -> None:
+        """The queue is empty: unblock, start the winners that asked to, and restore the rest of
+        what was running before the first run of the batch."""
         try:
             from .server import get_preset
-            previous = p.get("previous") or []
-            row = db.row("SELECT preset_id FROM tunes WHERE id=?", (self.tune_id,))
-            if best and p.get("start_after") and row and row["preset_id"]:
-                pr = get_preset(row["preset_id"])
+            manager.blocked = None
+            previous = self._batch["previous"] or []
+            winners = self._batch["winners"]
+            errors: list[str] = []
+            for model, preset_id in winners.items():
+                pr = get_preset(preset_id)
+                if not pr:
+                    errors.append(f"the tuned preset of {model} is gone")
+                    continue
                 await manager.start(pr["model"], pr["flags"], pr["env"], preset=pr, role=pr["role"], force=True)
-                previous = [s for s in previous if s["model"] != p["model"]]  # the winner replaces its own model
-            errors = await manager.restore(previous)
+            previous = [s for s in previous if s["model"] not in winners]  # the winners replace their own models
+            errors += await manager.restore(previous)
             if errors:
                 events.publish("tune_note", {"message": "Could not restart: " + "; ".join(errors)})
         except Exception as e:  # never let a restore failure mask the tuning result
             events.publish("tune_note", {"message": f"Could not restart the previous server: {e}"})
+        finally:
+            self._batch = None
 
     async def _spill_search(self, p: dict, cfg: dict, trial, probe, confirm, skip) -> dict:
         """Context objective: keep the target context, spill weights to system RAM until it fits.
@@ -803,13 +878,15 @@ class Tuner:
                                      "flags": json.dumps(rows), "env": json.dumps(p["base"]["env"]),
                                      "created_at": now, "updated_at": now})
 
-    def _publish(self) -> None:
-        if self.tune_id is None:
-            return
-        row = get_tune(self.tune_id)
+    def _publish_row(self, tid: int) -> None:
+        row = get_tune(tid)
         if row:
             row["live"] = self.live()
             events.publish("tune", row)
+
+    def _publish(self) -> None:
+        if self.tune_id is not None:
+            self._publish_row(self.tune_id)
 
 
 def _tuned_rows(c: dict) -> list[dict]:

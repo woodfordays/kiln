@@ -59,6 +59,7 @@ async def _autostart() -> None:
             await inst.wait_ready(config.SWAP_TIMEOUT_S)
         except Exception as e:
             log.error("autostart of %s failed: %s", p["name"], e)
+    await tuner.resume()  # a queue left by a restart starts once the boot presets are up
 
 
 async def main() -> None:
@@ -96,7 +97,7 @@ async def main() -> None:
     async def _shutdown_when_signalled() -> None:
         await stopping.wait()
         log.info("shutting down")
-        await tuner.cancel()
+        await tuner.shutdown()  # the queue survives the restart; a plain cancel would start the next run here
         await manager.shutdown()
         ui.should_exit = px.should_exit = True
 
