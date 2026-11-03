@@ -10,7 +10,9 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from kiln import db, tunespace, tuner as tuner_mod
+import httpx
+
+from kiln import api, db, tunespace, tuner as tuner_mod
 from kiln.server import manager
 from kiln.tuner import tuner, get_tune
 from . import ROOT
@@ -397,3 +399,447 @@ class QueueTests(Case):
         await tuner.resume()
         await tuner.wait_idle()
         self.assertEqual(get_tune(b)["status"], "done")
+
+
+class QueueApiTests(Case):
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        self.http = httpx.AsyncClient(transport=httpx.ASGITransport(app=api.app), base_url="http://kiln", timeout=60)
+        self.addAsyncCleanup(self.http.aclose)
+        self.addAsyncCleanup(tuner.wait_idle)
+
+    def body(self, name):
+        return {"ctx": 4096, "depth": 1024, "mode": "quick", "speculative": False,
+                "model": llm(DIR / "queue-api" / name / f"{name}-Q4.gguf")}
+
+    async def test_queueing_listing_and_removing_over_http(self):
+        r1 = (await self.http.post("/api/tune", json=self.body("a"))).json()
+        r2 = (await self.http.post("/api/tune", json=self.body("b"))).json()
+        r3 = (await self.http.post("/api/tune", json=self.body("c"))).json()
+        self.assertEqual([(r["status"], r["position"]) for r in (r1, r2, r3)], [("running", 0), ("queued", 1), ("queued", 2)])
+        listing = (await self.http.get("/api/tune")).json()
+        self.assertEqual([t["id"] for t in listing["queue"]], [r2["id"], r3["id"]])
+        self.assertNotIn(r2["id"], [t["id"] for t in listing["tunes"]])
+        self.assertEqual(listing["live"]["queued"], 2)
+        self.assertEqual((await self.http.delete(f"/api/tune/{r1['id']}")).status_code, 409)
+        self.assertEqual((await self.http.delete("/api/tune/424242")).status_code, 404)
+        self.assertEqual((await self.http.delete(f"/api/tune/{r2['id']}")).json(), {"ok": True})
+        self.assertEqual((await self.http.delete("/api/tune/queue")).json(), {"removed": 1})
+        self.assertEqual((await self.http.get("/api/tune")).json()["queue"], [])
+
+    async def test_a_bad_request_is_a_400_and_queues_nothing(self):
+        await self.http.post("/api/tune", json=self.body("a"))
+        r = await self.http.post("/api/tune", json={**self.body("b"), "ctx": 100})
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual((await self.http.get("/api/tune")).json()["queue"], [])
+
+
+class SearchSpaceRunTests(Case):
+    """Runs against the fake llama-server with a search space: what is fixed is in every trial, what is
+    listed is searched, and nothing the space leaves on auto changes."""
+
+    def plain(self, name="plain-Q4.gguf", directory="space"):
+        return llm(DIR / directory / name)
+
+    @staticmethod
+    def sp(**dims) -> dict:
+        return {k: (v if isinstance(v, dict) else {"mode": "list", "values": v}) for k, v in dims.items()}
+
+    @staticmethod
+    def fixed(v) -> dict:
+        return {"mode": "fixed", "values": [v]}
+
+    async def test_a_fixed_np_is_in_every_trial_and_the_preset(self):
+        t = await self.tune(self.plain(), mode="quick", space=self.sp(np=self.fixed("2")))
+        self.assertEqual(t["status"], "done", t.get("error"))
+        self.assertEqual({x["cfg"]["np"] for x in t["trials"]}, {"2"})
+        self.assertEqual(t["params"]["space"], {"np": {"mode": "fixed", "values": ["2"]}})
+        self.assertEqual([f for f in self.preset_flags(t) if f[0] == "-np"], [["-np", "2"]])
+        self.assertIn("-np 2", t["trials"][0]["label"])
+
+    async def test_a_ub_list_limits_the_grid_to_those_values(self):
+        t = await self.tune(self.plain(directory="space-ub"), space=self.sp(ub=["256", "1024"]))
+        self.assertEqual(t["status"], "done", t.get("error"))
+        grid = [x for x in t["trials"] if x["stage"] == "Grid"]
+        self.assertEqual({x["cfg"]["ub"] for x in t["trials"] if x["stage"] in ("Grid", "KV cache")}, {"256", "1024"})
+        self.assertEqual(t["trials"][0]["cfg"]["ub"], "256")  # the fit starts from the first listed value
+        self.assertEqual(len(grid), 3 * 2 - 1)  # 3 flash attention x 2 -ub, less the first fit that already ran
+
+    async def test_the_grid_size_in_the_plan_is_exact_with_a_space(self):
+        snaps = []
+        with mock.patch.object(tuner, "_publish", side_effect=lambda: snaps.append((tuner.stage, [dict(e) for e in tuner.plan]))):
+            t = await self.tune(self.plain(directory="space-plan"), space=self.sp(ub=["256", "1024"], np=["1", "2"]))
+        grid = [x for x in t["trials"] if x["stage"] == "Grid"]
+        self.assertEqual(len(grid), 3 * 2 * 2 - 1)
+        first = next(plan for stage, plan in snaps if stage == "Grid")
+        self.assertEqual(next(e["max"] for e in first if e["id"] == "grid"), len(grid))
+
+    async def test_fa_fixed_off_prunes_a_quantized_v_cache(self):
+        t = await self.tune(self.plain(directory="space-fa"), kv_policy="all", space=self.sp(
+            fa=self.fixed("off"), ctk=self.fixed("f16"), ctv=["f16", "q8_0"]))
+        self.assertEqual(t["status"], "done", t.get("error"))
+        pruned = [x for x in t["trials"] if x.get("pruned") and x["cfg"]["ctv"] == "q8_0"]
+        self.assertTrue(pruned)
+        self.assertEqual({x["error"] for x in pruned}, {"a quantized V cache needs flash attention"})
+        self.assertTrue(all(x["cfg"]["fa"] == "off" for x in t["trials"]))
+        self.assertEqual(t["best"]["cfg"]["ctv"], "f16")
+
+    async def test_ctk_list_with_ctv_fixed_fits_in_precision_order_and_precise_takes_the_first(self):
+        space = self.sp(ctk=["q4_0", "f16", "q8_0"], ctv=self.fixed("q8_0"))
+        t = await self.tune(self.plain(directory="space-kv"), mode="quick", space=space)
+        fits = [x for x in t["trials"] if x["stage"] == "KV cache"]
+        self.assertEqual([(x["cfg"]["ctk"], x["cfg"]["ctv"]) for x in fits], [("f16", "q8_0")])  # precise: the first fit
+        t = await self.tune(self.plain(directory="space-kv"), mode="quick", kv_policy="all", space=space)
+        fits = [x for x in t["trials"] if x["stage"] == "KV cache"]
+        self.assertEqual([(x["cfg"]["ctk"], x["cfg"]["ctv"]) for x in fits],
+                         [("f16", "q8_0"), ("q8_0", "q8_0"), ("q4_0", "q8_0")])
+
+    async def test_np_list_without_unified_kv_prunes_the_slot_that_is_too_small(self):
+        t = await self.tune(self.plain(directory="space-np"), space=self.sp(np=["1", "4"], kvu=self.fixed("off")))
+        self.assertEqual(t["status"], "done", t.get("error"))
+        pruned = [x for x in t["trials"] if x.get("pruned") and x["cfg"]["np"] == "4"]
+        self.assertEqual(len(pruned), 3 * 4)  # every np 4 combination: 3 flash attention x 4 -ub
+        self.assertEqual({x["error"] for x in pruned}, {"the deep prompt doesn't fit in one of 4 slots"})
+        self.assertTrue(all(x["cfg"]["np"] == "1" for x in t["trials"] if x["stage"] in ("KV cache", "Confirm")))
+
+    async def test_unified_kv_keeps_the_slots_whole(self):
+        t = await self.tune(self.plain(directory="space-kvu"), mode="quick", space=self.sp(np=["4"], kvu=self.fixed("on")))
+        self.assertEqual(t["status"], "done", t.get("error"))
+        self.assertFalse([x for x in t["trials"] if x.get("pruned")])
+        self.assertIn(["--kv-unified", None], self.preset_flags(t))  # a flag without a value is a row with value None
+
+    async def test_quick_mode_sweeps_a_threads_list_as_its_own_stage(self):
+        snaps = []
+        with mock.patch.object(tuner, "_publish", side_effect=lambda: snaps.append([dict(e) for e in tuner.plan])):
+            t = await self.tune(self.plain(directory="space-threads"), mode="quick", space=self.sp(threads=["4", "8", "12"]))
+        self.assertEqual(t["status"], "done", t.get("error"))
+        step = next(e for e in snaps[0] if e["id"] == "dim:threads")
+        self.assertEqual((step["label"], step["stages"], step["max"]), ("Threads", ["Threads"], 3))
+        self.assertEqual({x["cfg"]["threads"] for x in t["trials"]}, {"4", "8", "12"})
+        self.assertEqual([x["cfg"]["threads"] for x in t["trials"] if x["stage"] == "Threads"], ["8", "12"])  # 4 ran in the fit
+        self.assertEqual(t["best"]["cfg"]["threads"], "8")  # the fake's fastest
+        self.assertIn(["-t", "8"], self.preset_flags(t))
+        planned = {n for e in snaps[0] for n in e["stages"]}
+        self.assertLessEqual({x["stage"] for x in t["trials"]}, planned)
+
+    async def test_the_context_objective_sweeps_exactly_the_listed_threads(self):
+        model = llm(DIR / "space-ctx" / "moe-Q4.gguf", arch="qwen35moe", layers=8, **{"qwen35moe.expert_count": 8})
+        t = await self.tune(model, objective="context", space=self.sp(threads=["5", "8"], threads_batch=self.fixed("16")))
+        self.assertEqual(t["status"], "done", t.get("error"))
+        sweep = [x for x in t["trials"] if x["stage"] == "Threads"]
+        self.assertEqual([x["cfg"]["threads"] for x in sweep], ["5", "8"])
+        self.assertEqual({x["cfg"]["threads_batch"] for x in t["trials"]}, {"16"})
+        self.assertEqual(t["best"]["cfg"]["threads"], "8")
+
+    async def test_nmax_replaces_the_draft_lengths_and_is_clamped_to_the_block_size(self):
+        d = DIR / "space-nmax"
+        model = llm(d / "Fake-Q4.gguf")
+        dspark(d, block=7)
+        t = await self.tune(model, mode="quick", space=self.sp(nmax=["2", "4", "16"]))
+        self.assertEqual(t["status"], "done", t.get("error"))
+        self.assertEqual([x["cfg"]["nmax"] for x in t["trials"] if x["stage"] == "Speculative (DSpark)"], ["2", "4", "7"])
+
+    async def test_draft_gpu_layers_apply_to_draft_files_and_never_to_mtp(self):
+        d = DIR / "space-ngld"
+        model = llm(d / "Fake-Q4.gguf", arch="qwen35", **{"qwen35.nextn_predict_layers": 1})
+        draft = dspark(d)
+        t = await self.tune(model, mode="quick", space=self.sp(nmax=["3"], ngld=self.fixed("0")))
+        self.assertEqual(t["status"], "done", t.get("error"))
+        spec = [x for x in t["trials"] if x["stage"].startswith("Speculative")]
+        self.assertEqual({x["cfg"].get("ngld") for x in spec if x["cfg"]["spec"] == "draft-mtp"}, {None})
+        self.assertEqual({x["cfg"]["ngld"] for x in spec if x["cfg"]["draft"] == draft}, {"0"})
+        self.assertEqual(len({x["cfg"]["ngld"] for x in t["trials"] if "ngld" in x["cfg"]}), 1)
+        a = tuner_mod._tuned_args(next(x for x in spec if x["cfg"]["draft"])["cfg"])
+        self.assertEqual(a[a.index("-ngld"):a.index("-ngld") + 2], ["-ngld", "0"])
+        self.assertNotIn("-ngld", tuner_mod._tuned_args(next(x for x in spec if x["cfg"]["spec"] == "draft-mtp")["cfg"]))
+
+    async def test_a_listed_draft_setting_is_a_stage_after_speculation_in_quick_mode(self):
+        d = DIR / "space-pmin"
+        model = llm(d / "Fake-Q4.gguf")
+        dspark(d)
+        t = await self.tune(model, mode="quick", space=self.sp(pmin=["0.1", "0.5"]))
+        self.assertEqual(t["status"], "done", t.get("error"))
+        self.assertEqual([x["cfg"]["pmin"] for x in t["trials"] if x["stage"] == "Draft p-min"], ["0.1", "0.5"])
+        self.assertTrue(all("pmin" not in x["cfg"] for x in t["trials"] if x["stage"] != "Draft p-min"))
+
+    async def test_a_space_too_big_is_refused_before_a_run_exists(self):
+        big = self.sp(threads=[str(i) for i in range(1, 33)], np=[str(i) for i in range(1, 33)])
+        with self.assertRaisesRegex(ValueError, "combinations; narrow it to at most 4096"):
+            await tuner.start({"ctx": 4096, "model": self.plain(directory="space-big"), "space": big})
+        self.assertEqual(db.scalar("SELECT COUNT(*) FROM tunes"), 0)
+        self.assertFalse(tuner.running)
+
+    async def test_a_bad_space_value_is_refused(self):
+        with self.assertRaisesRegex(ValueError, "Micro-batch"):
+            await tuner.start({"ctx": 4096, "model": self.plain(), "space": {"ub": {"mode": "list", "values": ["0"]}}})
+
+    async def test_spec_off_removes_the_speculative_stages(self):
+        d = DIR / "space-specoff"
+        model = llm(d / "Fake-Q4.gguf", arch="qwen35", **{"qwen35.nextn_predict_layers": 1})
+        dspark(d)
+        snaps = []
+        with mock.patch.object(tuner, "_publish", side_effect=lambda: snaps.append([dict(e) for e in tuner.plan])):
+            t = await self.tune(model, mode="quick", space={"spec": {"mode": "off"}})
+        self.assertEqual(t["status"], "done", t.get("error"))
+        self.assertFalse([x for x in t["trials"] if x["stage"].startswith("Speculative")])
+        self.assertFalse([e for e in snaps[0] if e["id"].startswith("spec:")])
+        self.assertIsNone(t["best"]["cfg"]["spec"])
+
+    async def test_the_base_presets_flags_are_stripped_only_for_dimensions_the_space_sets(self):
+        model = self.plain(directory="space-strip")
+        base = db.insert("presets", {"name": "Hand-made", "model": model, "created_at": 0, "updated_at": 0, "env": "{}",
+                                     "flags": json.dumps([{"flag": "--jinja", "value": None}, {"flag": "-np", "value": "4"},
+                                                          {"flag": "--kv-unified", "value": None},
+                                                          {"flag": "--no-op-offload", "value": None}])})
+        t = await self.tune(model, mode="quick", base_preset_id=base,
+                            space=self.sp(np=self.fixed("2"), op_offload=self.fixed("on")))
+        self.assertEqual(t["status"], "done", t.get("error"))
+        flags_ = self.preset_flags(t)
+        self.assertEqual([f for f in flags_ if f[0] == "-np"], [["-np", "2"]])
+        self.assertEqual([f for f in flags_ if f[0] == "--kv-unified"], [["--kv-unified", None]])  # kvu is auto: kept
+        self.assertNotIn(["--no-op-offload", None], flags_)  # op_offload is fixed: replaced
+        self.assertIn(["--op-offload", None], flags_)
+
+    async def test_a_context_list_depth_follows_the_smallest_and_the_fit_starts_from_the_largest(self):
+        t = await self.tune(self.plain(directory="space-ctx-list"), mode="quick", depth=8192,
+                            space=self.sp(ctx=["4096", "2048"]))
+        self.assertEqual(t["status"], "done", t.get("error"))
+        self.assertEqual(t["params"]["depth"], 2048 - 128)
+        self.assertEqual(t["trials"][0]["cfg"]["ctx"], "4096")
+
+    async def test_no_space_leaves_the_configurations_as_they_were(self):
+        t = await self.tune(self.plain(directory="space-none"), mode="quick")
+        self.assertEqual(t["params"]["space"], {})
+        self.assertEqual(set(t["trials"][0]["cfg"]), {"ngl", "ctx", "np", "fa", "ctk", "ctv", "ub", "b", "spec", "draft",
+                                                     "nmax", "ncmoe", "threads", "threads_batch"})
+
+
+class SearchSpaceUnitTests(unittest.TestCase):
+    base = {"ngl": "99", "ctx": "4096", "ctk": "f16", "ctv": "f16", "fa": "on", "ub": "512", "b": "2048",
+            "spec": None, "draft": None, "nmax": None}
+
+    def test_needs_more_grows_ub_b_and_ngld_and_ignores_what_costs_no_memory(self):
+        needs = tuner_mod._needs_more
+        b = self.base
+        self.assertTrue(needs({**b, "ub": "1024"}, b))
+        self.assertTrue(needs({**b, "threads": "4", "numa": "isolate", "poll": "0", "prio": "2", "cache_reuse": "64",
+                               "load_mode": "mmap", "repack": "on"}, b))  # no VRAM effect
+        d = {**b, "spec": "draft-dspark", "draft": "/m/d.gguf", "nmax": "3", "ngld": "10"}
+        self.assertTrue(needs({**d, "ngld": "99", "nmin": "1", "pmin": "0.5"}, d))
+        self.assertFalse(needs({**d, "ngld": "5"}, d))
+        self.assertTrue(needs({**d, "ngld": "10", "nmax": "5"}, d))
+        self.assertFalse(needs({**d, "ctkd": "q8_0"}, d))  # another draft cache type: not comparable
+        self.assertFalse(needs({**b, "np": "2"}, b))        # a key one side lacks counts as None
+        self.assertTrue(needs({**b, "np": "2", "ub": "1024"}, {**b, "np": "2"}))
+        self.assertFalse(needs({**b, "kvu": "on"}, {**b, "kvu": "off"}))
+        self.assertFalse(needs({**b, "ctx": "2048"}, b))
+        self.assertTrue(needs({**b, "b": "4096"}, b))
+
+    def test_rows_and_arguments_carry_valueless_flags_after_todays_flags(self):
+        c = {**self.base, "np": "2", "kvu": "on", "swa_full": "off", "numa": "none", "poll": "0", "threads": "9"}
+        rows = tuner_mod._tuned_rows(c)
+        self.assertEqual(rows[-3:], [{"flag": "-t", "value": "9"}, {"flag": "--kv-unified", "value": None},
+                                     {"flag": "--poll", "value": "0"}])
+        a = tuner_mod._tuned_args(c)
+        self.assertEqual(a[a.index("-t"):], ["-t", "9", "--kv-unified", "--poll", "0"])
+        self.assertEqual(tuner_mod._combo_label(c), "-ctk f16 -ctv f16 · -fa on · -ub 512 -b 2048 · -t 9 · -np 2 · "
+                                                    "--kv-unified · --poll 0 · no spec")
+        self.assertEqual(tuner_mod._complexity(c), 1 + 1 + 1 + 1)  # threads, np, kvu, poll
+
+    def test_ngl_auto_still_means_fit_on(self):
+        a = tuner_mod._tuned_args({**self.base, "ngl": "auto", "np": "1"})
+        self.assertEqual(a[:2], ["--fit", "on"])
+
+
+class SpaceTests(unittest.TestCase):
+    """The search space's schema: validation, flag rows, KV pairs and candidate counts (no run is started)."""
+
+    def base(self, **kw) -> dict:
+        return {"objective": "decode", "mode": "grid", "kv_policy": "precise", "vary_batch": False, "space": {},
+                "spec_groups": [], "kv_ladder": tuner_mod.KV_LADDER, "ubatches": tuner_mod.UBATCHES, **kw}
+
+    def test_no_space_is_the_default(self):
+        self.assertEqual(tunespace.normalize(None), {})
+        self.assertEqual(tunespace.normalize({"ub": {"mode": "auto"}}), {})
+
+    def test_unknown_key_and_mode_are_refused(self):
+        with self.assertRaisesRegex(ValueError, "Unknown search dimension: nope"):
+            tunespace.normalize({"nope": {"mode": "auto"}})
+        with self.assertRaisesRegex(ValueError, "Micro-batch: unknown mode 'some'"):
+            tunespace.normalize({"ub": {"mode": "some"}})
+
+    def test_bad_values_name_the_dimension(self):
+        with self.assertRaisesRegex(ValueError, r"^Micro-batch: 70000 is above 65536\.$"):
+            tunespace.normalize({"ub": {"mode": "list", "values": ["256", "70000"]}})
+        with self.assertRaisesRegex(ValueError, "Flash attention: maybe is not one of on, off, auto"):
+            tunespace.normalize({"fa": {"mode": "fixed", "values": ["maybe"]}})
+        with self.assertRaisesRegex(ValueError, "Draft p-min: 1.5 is above 1"):
+            tunespace.normalize({"pmin": {"mode": "fixed", "values": ["1.5"]}})
+        with self.assertRaisesRegex(ValueError, "Tensor split: 'a,b' is not valid"):
+            tunespace.normalize({"tensor_split": {"mode": "fixed", "values": ["a,b"]}})
+        with self.assertRaisesRegex(ValueError, "Micro-batch: 'x' is not a whole number"):
+            tunespace.normalize({"ub": {"mode": "fixed", "values": ["x"]}})
+        with self.assertRaisesRegex(ValueError, "Micro-batch: .* is not a value"):
+            tunespace.normalize({"ub": {"mode": "fixed", "values": [True]}})
+
+    def test_fixed_needs_one_value_and_list_needs_one_to_32(self):
+        with self.assertRaisesRegex(ValueError, "fixed needs exactly one value"):
+            tunespace.normalize({"np": {"mode": "fixed", "values": ["1", "2"]}})
+        with self.assertRaisesRegex(ValueError, "fixed needs exactly one value"):
+            tunespace.normalize({"np": {"mode": "fixed", "values": []}})
+        with self.assertRaisesRegex(ValueError, "Parallel slots: a list needs 1 to 32 values"):
+            tunespace.normalize({"np": {"mode": "list", "values": []}})
+        with self.assertRaisesRegex(ValueError, "a list needs 1 to 32 values"):
+            tunespace.normalize({"np": {"mode": "list", "values": [str(i) for i in range(1, 34)]}})
+
+    def test_numbers_become_strings_and_lists_are_deduplicated_in_order(self):
+        out = tunespace.normalize({"ub": {"mode": "list", "values": [256, "512", "256", 1024.0]}})
+        self.assertEqual(out, {"ub": {"mode": "list", "values": ["256", "512", "1024"]}})
+        self.assertEqual(tunespace.normalize({"ub": {"mode": "fixed", "values": [512]}})["ub"]["values"], ["512"])
+
+    def test_floats_and_ints_keep_their_range_and_format(self):
+        out = tunespace.normalize({"pmin": {"mode": "list", "values": [0.5, "0.25", "1"]},
+                                   "prio": {"mode": "fixed", "values": ["-1"]},
+                                   "ngl": {"mode": "fixed", "values": ["auto"]}})
+        self.assertEqual(out["pmin"]["values"], ["0.5", "0.25", "1"])
+        self.assertEqual(out["prio"]["values"], ["-1"])
+        self.assertEqual(out["ngl"]["values"], ["auto"])
+        with self.assertRaisesRegex(ValueError, "Priority: -2 is below -1"):
+            tunespace.normalize({"prio": {"mode": "fixed", "values": ["-2"]}})
+
+    def test_off_stores_its_off_value_and_ignores_the_values_sent(self):
+        out = tunespace.normalize({"ub": {"mode": "off", "values": ["1"]}, "kvu": {"mode": "off"},
+                                   "ngl": {"mode": "off"}, "numa": {"mode": "off", "values": ["isolate"]}})
+        self.assertEqual(out["ub"], {"mode": "off", "values": ["512"]})
+        self.assertEqual(out["kvu"], {"mode": "off", "values": []})
+        self.assertEqual(out["ngl"], {"mode": "off", "values": ["99"]})
+        self.assertEqual(out["numa"], {"mode": "off", "values": []})
+
+    def test_spec_allows_only_auto_and_off(self):
+        self.assertEqual(tunespace.normalize({"spec": {"mode": "off"}}), {"spec": {"mode": "off", "values": []}})
+        with self.assertRaisesRegex(ValueError, "Speculative decoding: only off or auto"):
+            tunespace.normalize({"spec": {"mode": "list", "values": ["draft-mtp"]}})
+
+    def test_emit_toggles_and_plain_flags(self):
+        self.assertEqual(tunespace.emit("kvu", "on"), [{"flag": "--kv-unified", "value": None}])
+        self.assertEqual(tunespace.emit("kvu", "off"), [{"flag": "--no-kv-unified", "value": None}])
+        self.assertEqual(tunespace.emit("swa_full", "off"), [])
+        self.assertEqual(tunespace.emit("swa_full", "on"), [{"flag": "--swa-full", "value": None}])
+        self.assertEqual(tunespace.emit("kv_offload", "off"), [{"flag": "-nkvo", "value": None}])
+        self.assertEqual(tunespace.emit("numa", "none"), [])
+        self.assertEqual(tunespace.emit("numa", "isolate"), [{"flag": "--numa", "value": "isolate"}])
+        self.assertEqual(tunespace.emit("ub", "512"), [{"flag": "-ub", "value": "512"}])
+        self.assertEqual(tunespace.emit("ctv", "q8_0"), [{"flag": "-ctv", "value": "q8_0"}])
+
+    def test_kv_pairs_with_both_auto_is_the_ladder(self):
+        self.assertEqual(tunespace.kv_pairs({}, tuner_mod.KV_LADDER), tuner_mod.KV_LADDER)
+
+    def test_kv_pairs_sort_most_precise_first(self):
+        space = tunespace.normalize({"ctk": {"mode": "list", "values": ["q4_0", "f16", "q8_0"]},
+                                     "ctv": {"mode": "fixed", "values": ["q8_0"]}})
+        self.assertEqual(tunespace.kv_pairs(space, tuner_mod.KV_LADDER),
+                         [("f16", "q8_0"), ("q8_0", "q8_0"), ("q4_0", "q8_0")])
+        off_v = tunespace.normalize({"ctv": {"mode": "off"}})
+        self.assertEqual(tunespace.kv_pairs(off_v, tuner_mod.KV_LADDER),
+                         [("f16", "f16"), ("q8_0", "f16"), ("q4_0", "f16")])
+
+    def test_stripped_flags_cover_every_spelling_of_each_non_auto_dimension(self):
+        space = tunespace.normalize({"ub": {"mode": "list", "values": ["512"]}, "kvu": {"mode": "fixed", "values": ["on"]},
+                                     "ctk": {"mode": "off"}, "np": {"mode": "auto"}})
+        flags = tunespace.stripped_flags(space)
+        self.assertTrue({"-ub", "--ubatch-size", "-kvu", "--kv-unified", "-no-kvu", "--no-kv-unified",
+                         "-ctk", "--cache-type-k"} <= flags)
+        self.assertFalse(flags & {"-np", "--parallel", "-fa"})
+
+    def test_default_grid_count_matches_the_page_estimate(self):
+        # tuner.js estimate(): kv * fa * batches * (1 + spec) + 3, with fa 3 and batches 4 (11 with vary_batch).
+        self.assertEqual(tunespace.count(self.base()), 15)
+        self.assertEqual(tunespace.count(self.base(vary_batch=True)), 1 * 3 * 11 + 3)  # 11 (ub, b) pairs
+        mtp = [{"lengths": tuner_mod.MTP_NMAX, "file": False, "block": None}]
+        self.assertEqual(tunespace.count(self.base(spec_groups=mtp)), 1 * 3 * 4 * (1 + 5) + 3)
+
+    def test_grid_count_with_two_ub_and_two_np_values(self):
+        space = tunespace.normalize({"ub": {"mode": "list", "values": ["256", "1024"]},
+                                     "np": {"mode": "list", "values": ["1", "2"]}})
+        # 1 KV pair x 3 fa x 2 (ub, b) pairs x 2 np x 1 + 3
+        self.assertEqual(tunespace.count(self.base(space=space)), 3 * 2 * 2 + 3)
+
+    def test_quick_count_with_three_thread_values(self):
+        space = tunespace.normalize({"threads": {"mode": "list", "values": ["4", "8", "12"]}})
+        # 4 fit + 2 flash attention + 4 batch sizes (the page's figure) + 2 more thread values
+        self.assertEqual(tunespace.count(self.base(mode="quick", space=space)), 4 + 2 + 4 + 2)
+
+    def test_context_count_with_thread_lists(self):
+        space = tunespace.normalize({"threads": {"mode": "list", "values": ["4", "8"]},
+                                     "threads_batch": {"mode": "list", "values": ["8", "12", "16"]}})
+        self.assertEqual(tunespace.count(self.base(objective="context", space=space)), 21 + 5 + 3)
+        self.assertEqual(tunespace.count(self.base(objective="context")), 21 + 5 + 3)
+
+    def test_a_count_above_the_cap_is_refused(self):
+        space = tunespace.normalize({"threads": {"mode": "list", "values": [str(i) for i in range(1, 33)]},
+                                     "np": {"mode": "list", "values": [str(i) for i in range(1, 33)]}})
+        n = tunespace.count(self.base(space=space))
+        self.assertEqual(n, 3 * 4 * 32 * 32 + 3)
+        self.assertGreater(n, tunespace.MAX_CANDIDATES)
+        with self.assertRaisesRegex(ValueError, rf"This search has {n} combinations; narrow it to at most 4096\."):
+            tunespace.check(self.base(space=space))
+        self.assertEqual(tunespace.check(self.base()), 15)
+
+    def test_a_draft_file_length_is_capped_by_its_block_size(self):
+        space = tunespace.normalize({"nmax": {"mode": "list", "values": ["4", "8", "16"]}})
+        groups = [{"lengths": ["3", "5", "7", "10"], "file": True, "block": 15}]
+        # 4 -> 4, 8 -> 8, 16 -> 15: three distinct lengths
+        self.assertEqual(tunespace.count(self.base(space=space, spec_groups=groups)), 1 * 3 * 4 * (1 + 3) + 3)
+
+
+@unittest.skipUnless(shutil.which("node"), "needs node")
+class CountParityTests(unittest.TestCase):
+    """The Tuner page's live estimate (web/js/tunespace.js) and the server's count and cap agree."""
+    CASES = [
+        {},
+        {"kv_policy": "all"},
+        {"vary_batch": True},
+        {"mode": "quick"},
+        {"mode": "quick", "kv_policy": "all"},
+        {"objective": "context"},
+        {"objective": "context", "kv_policy": "all"},
+        {"mtp": True},
+        {"mtp": True, "drafts": True, "mode": "quick"},
+        {"drafts": True, "space": {"nmax": {"mode": "list", "values": ["4", "8", "16"]},
+                                   "pmin": {"mode": "list", "values": ["0", "0.5"]},
+                                   "ngld": {"mode": "list", "values": ["0", "99"]}}},
+        {"drafts": True, "mode": "quick", "space": {"pmin": {"mode": "list", "values": ["0", "0.5"]},
+                                                    "ctkd": {"mode": "list", "values": ["f16", "q8_0"]}}},
+        {"objective": "context", "drafts": True, "space": {"ngld": {"mode": "list", "values": ["0", "99"]}}},
+        {"space": {"ub": {"mode": "list", "values": ["256", "4096"]}, "b": {"mode": "list", "values": ["2048", "4096"]},
+                   "np": {"mode": "list", "values": ["1", "2"]}, "kvu": {"mode": "list", "values": ["on", "off"]}}},
+        {"kv_policy": "all", "space": {"ctk": {"mode": "list", "values": ["f16", "q8_0"]}, "ctv": {"mode": "fixed", "values": ["q4_0"]},
+                                       "fa": {"mode": "list", "values": ["on", "auto"]}}},
+        {"mode": "quick", "space": {"fa": {"mode": "off"}, "b": {"mode": "list", "values": ["2048", "4096"]},
+                                    "threads": {"mode": "list", "values": ["4", "8"]}}},
+        {"objective": "context", "space": {"threads": {"mode": "fixed", "values": ["8"]}}},
+        {"objective": "context", "space": {"threads": {"mode": "off"}, "threads_batch": {"mode": "list", "values": ["8", "16"]},
+                                           "np": {"mode": "list", "values": ["1", "2", "4"]}}},
+        {"mtp": True, "space": {"spec": {"mode": "off"}}},
+    ]
+
+    def test_the_page_and_the_server_count_the_same(self):
+        draft = {"type": "draft-dspark", "block_size": 15, "path": "/m/d.gguf"}
+        js, py = [], []
+        for case in self.CASES:
+            space = case.get("space", {})
+            drafts = [draft] if case.get("drafts") else []
+            prm = {"objective": case.get("objective", "decode"), "mode": case.get("mode", "grid"),
+                   "kv_policy": case.get("kv_policy", "precise"), "vary_batch": case.get("vary_batch", False),
+                   "speculative": True, "drafts": drafts, "space": space}
+            js.append({"prm": prm, "model": {"nextn_layers": 1 if case.get("mtp") else 0}})
+            groups = ([{"lengths": tuner_mod.MTP_NMAX, "file": False, "block": None}] if case.get("mtp") else []) + \
+                [{"lengths": tuner_mod._draft_lengths(d), "file": True, "block": d["block_size"]} for d in drafts]
+            py.append(tunespace.count({**prm, "space": tunespace.normalize(space), "spec_groups": groups,
+                                       "kv_ladder": tuner_mod.KV_LADDER, "ubatches": tuner_mod.UBATCHES}))
+        web = Path(__file__).resolve().parents[2] / "web" / "js" / "tunespace.js"
+        script = (f"import({json.dumps(web.as_uri())}).then((m) => console.log(JSON.stringify("
+                  f"{json.dumps(js)}.map((c) => m.countCandidates(c.prm, c.model)))))")
+        out = subprocess.run(["node", "--input-type=module", "-e", script], capture_output=True, text=True, timeout=60)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(json.loads(out.stdout), py)

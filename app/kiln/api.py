@@ -650,7 +650,11 @@ class TuneBody(BaseModel):
 
 @app.post("/api/tune")
 async def tune_start(body: TuneBody):
-    return {"id": await tuner.start(body.model_dump())}
+    tid = await tuner.start(body.model_dump())
+    row = db.row("SELECT status FROM tunes WHERE id=?", (tid,))
+    # position: 0 for a run that started now, else its 1-based place in the queue
+    position = 0 if row["status"] == "running" else db.scalar("SELECT COUNT(*) FROM tunes WHERE status='queued' AND id<=?", (tid,))
+    return {"id": tid, "status": row["status"], "position": position}
 
 
 @app.post("/api/tune/cancel")
@@ -661,9 +665,21 @@ async def tune_cancel():
 
 @app.get("/api/tune")
 async def tune_list(limit: int = 20):
-    rows = db.rows("SELECT id FROM tunes ORDER BY id DESC LIMIT ?", (limit,))
-    out = [get_tune(r["id"]) for r in rows]
-    return {"live": tuner.live(), "tunes": out}
+    rows = db.rows("SELECT id FROM tunes WHERE status != 'queued' ORDER BY id DESC LIMIT ?", (limit,))
+    tunes = [get_tune(r["id"]) for r in rows]
+    queue = [get_tune(r["id"]) for r in db.rows("SELECT id FROM tunes WHERE status='queued' ORDER BY id")]
+    return {"live": tuner.live(), "queue": queue, "tunes": tunes}
+
+
+@app.delete("/api/tune/queue")
+async def tune_clear_queue():
+    return {"removed": tuner.clear_queue()}
+
+
+@app.delete("/api/tune/{tid}")
+async def tune_remove(tid: int):
+    tuner.remove(tid)
+    return {"ok": True}
 
 
 @app.get("/api/tune/{tid}")
