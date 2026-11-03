@@ -2,7 +2,9 @@
 import time
 import unittest
 
-from kiln import db, stats
+import httpx
+
+from kiln import api, db, stats
 
 
 def request(**kw) -> int:
@@ -42,3 +44,19 @@ class TokensReadTests(unittest.TestCase):
         self.assertEqual(s["current"]["read_n"], 0)
         self.assertTrue(all(t["read_n"] == 0 for t in s["trend"]))
         self.assertEqual(stats.lifetime()["read_n"], 0)
+
+
+class RequestLogTests(unittest.IsolatedAsyncioTestCase):
+    """The request log (/api/requests) gives each request its tokens read, for the Overview and Requests tables."""
+
+    async def asyncSetUp(self):
+        db.execute("DELETE FROM requests")
+        self.http = httpx.AsyncClient(transport=httpx.ASGITransport(app=api.app), base_url="http://kiln")
+        self.addAsyncCleanup(self.http.aclose)
+
+    async def test_each_request_says_how_many_tokens_it_read(self):
+        request(prompt_n=815, cache_n=3200)
+        request(prompt_n=40, cache_n=None)  # llama-server sent no cache count
+        request(status=502, prompt_n=None, cache_n=None, predicted_n=None, error="upstream closed")  # no timings at all
+        rows = (await self.http.get("/api/requests")).json()["rows"]
+        self.assertEqual([r["read_n"] for r in rows], [None, 40, 4015])  # newest first

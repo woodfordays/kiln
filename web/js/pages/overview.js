@@ -333,7 +333,8 @@ function RecentCard({ data }) {
   const columns = [
     { key: 'ts', header: 'When', render: (r) => html`<span className="nowrap">${fmtWhen(r.ts, now)}</span>` },
     { key: 'endpoint', header: 'Endpoint', mono: true },
-    { key: 'prompt_n', header: 'Prompt', numeric: true, render: (r) => fmtInt(r.prompt_n) },
+    { key: 'read_n', header: 'Read', numeric: true, render: (r) => (isNum(r.read_n)
+      ? html`<span title=${`${fmtInt(r.prompt_n || 0)} prefilled · ${fmtInt(r.cache_n || 0)} from cache`}>${fmtInt(r.read_n)}</span>` : '–') },
     { key: 'predicted_n', header: 'Generated', numeric: true, render: (r) => fmtInt(r.predicted_n) },
     { key: 'predicted_tps', header: 'Decode t/s', numeric: true, render: (r) => fmtTps(r.predicted_tps) },
     { key: 'status', header: 'Status', render: (r) => html`<${RequestStatus} r=${r} />` },

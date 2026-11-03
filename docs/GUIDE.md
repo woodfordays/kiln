@@ -336,7 +336,7 @@ Every request through the API port, newest first, 50 per page. Filter by result 
 
 | Column | Meaning |
 |---|---|
-| Prompt, Cached, Generated | New prompt tokens, tokens reused from the prompt cache, and tokens generated. |
+| Read, Cached, Generated | Every prompt token the request read (point at it to see how many were prefilled and how many came from the cache), the part reused from the prompt cache, and tokens generated. |
 | Prefill t/s, Decode t/s | llama-server's own rates for the request. |
 | Model load | Time the request waited for its model to be loaded, when it had to be. Not counted in TTFT. |
 | TTFT, Total | Time to first token and wall time. |

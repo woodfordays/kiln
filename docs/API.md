@@ -539,7 +539,7 @@ with `enabled: false` stays in the preset but isn't passed to llama-server. Flag
 | GET | `/api/stats/lifetime` | | All-time totals, `read_n` included |
 | GET | `/api/stats/slots` | | `{model: slot}`: each model's fixed chart color (1–6, all-time top six) |
 | POST | `/api/stats/reset` | body `{confirm: true}` | `{deleted}`. Deletes all request and GPU history. |
-| GET | `/api/requests` | `limit=50` (max 500), `offset=0`, `model`, `status` (`ok`, `errors`) | `{total, rows}` |
+| GET | `/api/requests` | `limit=50` (max 500), `offset=0`, `model`, `status` (`ok`, `errors`) | `{total, rows}`. Each row also has `read_n`: `prompt_n` + `cache_n`, or `null` when llama-server sent no timings |
 | GET | `/api/requests.csv` | `range=all`, `model` | CSV download |
 | GET | `/api/gpu/live` | | `{available, name, samples}` (last 10 min at 2 s) |
 | GET | `/api/gpu/history` | `range` | 1-minute GPU averages |

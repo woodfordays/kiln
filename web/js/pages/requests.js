@@ -23,7 +23,8 @@ export function RequestsPage() {
     { key: 'ts', header: 'When', render: (r) => html`<span className="nowrap" title=${fmtDateTime(r.ts)}>${fmtWhen(r.ts, now)}</span>` },
     { key: 'model', header: 'Model', render: (r) => html`<div className="cell-main"><span className="truncate" style=${{ maxWidth: 220 }} title=${r.model}>${r.model || '–'}</span>
       <span className="cell-sub text-caption mono">${r.endpoint}${r.stream ? ' · stream' : ''}</span></div>` },
-    { key: 'prompt_n', header: 'Prompt', numeric: true, render: (r) => fmtInt(r.prompt_n) },
+    { key: 'read_n', header: 'Read', numeric: true, render: (r) => (isNum(r.read_n)
+      ? html`<span title=${`${fmtInt(r.prompt_n || 0)} prefilled · ${fmtInt(r.cache_n || 0)} from cache`}>${fmtInt(r.read_n)}</span>` : '–') },
     { key: 'cache_n', header: 'Cached', numeric: true, render: (r) => fmtInt(r.cache_n) },
     { key: 'predicted_n', header: 'Generated', numeric: true, render: (r) => fmtInt(r.predicted_n) },
     { key: 'prompt_tps', header: 'Prefill t/s', numeric: true, render: (r) => fmtTps(r.prompt_tps) },
