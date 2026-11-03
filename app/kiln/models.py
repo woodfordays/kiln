@@ -82,11 +82,19 @@ def _companion_stem(name: str) -> str:
 
 
 def _owner(companion: dict, models: list[dict]) -> str | None:
-    """Path of the model in `models` whose name best matches the companion's, or None when there is no model."""
+    """Path of the model in `models` the companion belongs to, or None when it matches no model.
+
+    A real name match wins; a tie goes to the model whose name sorts first (several quants of one model).
+    With no match at all, a companion may only be attributed to the folder's single model — guessing between
+    unrelated models would hide the file behind the wrong chevron.
+    """
     if not models:
         return None
     stem = _companion_stem(companion["name"])
-    return min(models, key=lambda m: (-_shared_prefix(stem, m["name"]), m["name"].lower()))["path"]
+    scored = sorted(models, key=lambda m: (-_shared_prefix(stem, m["name"]), m["name"].lower()))
+    if not _shared_prefix(stem, scored[0]["name"]) and len(models) > 1:
+        return None
+    return scored[0]["path"]
 
 
 def scan_roots() -> list[Path]:

@@ -37,7 +37,7 @@ class LibraryTests(unittest.TestCase):
         self.assertIsNone(by["Beta-3B-Q8_0"]["companion_of"])
         self.assertEqual(by["mmproj-Beta-3B-f16"]["companion_of"], by["Beta-3B-Q8_0"]["path"])
         self.assertEqual(by["dspark-Alpha-8B"]["companion_of"], by["Alpha-8B-Q4_K_M"]["path"])  # "dspark-" ignored
-        self.assertEqual(by["mmproj-F16"]["companion_of"], by["Alpha-8B-Q4_K_M"]["path"])  # no match: first by name
+        self.assertIsNone(by["mmproj-F16"]["companion_of"])  # no match and two unrelated models: stays top-level
 
     def test_a_companion_alone_in_its_folder_belongs_to_nothing(self):
         write_gguf(ROOT / "models" / "gguf" / "org" / "lonely" / "mmproj-Solo-f16.gguf",
@@ -45,6 +45,21 @@ class LibraryTests(unittest.TestCase):
         solo = next(m for m in models.scan() if m["name"] == "mmproj-Solo-f16")
         self.assertTrue(solo["is_projector"])
         self.assertIsNone(solo["companion_of"])
+
+    def test_a_no_match_projector_with_two_different_models_stays_top_level(self):
+        d = ROOT / "models" / "gguf" / "org" / "unrelated"
+        llm(d / "Llama-3-8B-Q4.gguf")
+        llm(d / "Qwen2.5-VL-7B-Q4.gguf")
+        write_gguf(d / "mmproj-model-f16.gguf", {"general.architecture": "clip", "general.type": "mmproj"})
+        by = {m["name"]: m for m in models.scan() if Path(m["path"]).parent.name == "unrelated"}
+        self.assertIsNone(by["mmproj-model-f16"]["companion_of"])  # never guess between different models
+
+    def test_a_no_match_companion_with_one_model_belongs_to_it(self):
+        d = ROOT / "models" / "gguf" / "org" / "single"
+        llm(d / "Llama-3-8B-Q4.gguf")
+        write_gguf(d / "mmproj-model-f16.gguf", {"general.architecture": "clip", "general.type": "mmproj"})
+        by = {m["name"]: m for m in models.scan() if Path(m["path"]).parent.name == "single"}
+        self.assertEqual(by["mmproj-model-f16"]["companion_of"], by["Llama-3-8B-Q4"]["path"])
 
     def test_the_stem_drops_only_a_leading_kind_word(self):
         self.assertEqual(models._companion_stem("dspark-Alpha-8B"), "Alpha-8B")
