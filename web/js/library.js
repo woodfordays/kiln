@@ -14,23 +14,25 @@ export function nestLibrary(models) {
   for (const m of models) {
     if (!m.companion_of) continue;
     const parent = byPath.get(m.companion_of);
-    if (parent) parent.children.push({ ...m });
+    if (parent) parent.children.push({ ...m, parentName: parent.name });
     else tops.push({ ...m, children: [] }); // its model is missing from the list: keep it on top
   }
   for (const t of tops) t.children.sort(cmpName);
   return tops;
 }
 
-// The rows to render, in order. Each row is the model object plus three fields:
-//   depth: 0 (top level) or 1 (a companion), childCount: how many companions it has, open: shown expanded.
+// The rows to render, in order. Each row is the model object plus: depth (0 = top level, 1 = a companion),
+// childCount and open. Top-level rows also carry forcedOpen: a matching companion holds them open, so the
+// chevron must not toggle. Child rows carry parentName: the model they're shown under.
 // sort: { key, direction: 'asc'|'desc' } on a model field (strings compare case-insensitively;
 //   null/undefined last in both directions; ties keep input order). Children always follow their parent, by name.
-// filter: text matched case-insensitively against `${name} ${repo} ${arch}`. A parent that matches shows (its
-//   children only when open). A parent that doesn't match but has matching children shows opened, with only those.
+// filter: text matched case-insensitively against name, repo and arch (only the ones present). A parent that
+//   matches shows (its children only when open). A parent that doesn't match but has matching children shows
+//   opened, with only those.
 // expanded: a Set of parent paths the user opened.
 export function libraryRows(groups, { sort, filter, expanded }) {
   const f = (filter || '').trim().toLowerCase();
-  const matches = (m) => !f || `${m.name} ${m.repo} ${m.arch}`.toLowerCase().includes(f);
+  const matches = (m) => !f || [m.name, m.repo, m.arch].filter(Boolean).join(' ').toLowerCase().includes(f);
   const dir = sort && sort.direction === 'asc' ? 1 : -1;
   const tops = sort ? groups.slice().sort((a, b) => cmp(a, b, sort.key, dir)) : groups;
   const rows = [];
@@ -39,7 +41,7 @@ export function libraryRows(groups, { sort, filter, expanded }) {
     const childHits = g.children.filter(matches);
     if (!parentShown && !childHits.length) continue;
     const open = parentShown ? expanded.has(g.path) : true; // a matching companion forces its model open
-    rows.push({ ...g, depth: 0, childCount: g.children.length, open });
+    rows.push({ ...g, depth: 0, childCount: g.children.length, open, forcedOpen: !parentShown });
     if (open) for (const c of parentShown ? g.children : childHits) rows.push({ ...c, depth: 1, childCount: 0, open: false });
   }
   return rows;

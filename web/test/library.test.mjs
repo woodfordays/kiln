@@ -15,7 +15,16 @@ const opts = (o) => ({ sort: { key: 'name', direction: 'asc' }, filter: '', expa
 test('nestLibrary puts companions under their model and leaves the rest on top', () => {
   assert.deepEqual(nestLibrary(lib).map((m) => [m.name, m.children.map((c) => c.name)]),
     [['Alpha-Q4', ['dspark-Alpha', 'mmproj-Alpha']], ['Beta-Q8', []], ['mmproj-Lonely', []]]);
+  assert.deepEqual(nestLibrary(lib)[0].children.map((c) => c.parentName), ['Alpha-Q4', 'Alpha-Q4']);
   assert.equal(lib[0].children, undefined); // the input is not changed
+});
+
+test('a companion whose model is missing from the list stays on top', () => {
+  const lib2 = [...lib, { path: '/m/d/mmproj-Ghost', name: 'mmproj-Ghost', repo: 'org/d', arch: 'clip',
+                          size: 1, mtime: 2, is_projector: true, companion_of: '/m/d/Ghost-Q4' }];
+  const tops = nestLibrary(lib2);
+  assert.deepEqual(tops.map((m) => [m.name, m.children.length]),
+    [['Alpha-Q4', 2], ['Beta-Q8', 0], ['mmproj-Lonely', 0], ['mmproj-Ghost', 0]]);
 });
 
 test('models start collapsed', () => {
@@ -31,8 +40,21 @@ test('sorting orders the models and children stay under their parent', () => {
 });
 
 test('a filter matching only a companion shows its model opened with just that companion', () => {
-  assert.deepEqual(names(libraryRows(nestLibrary(lib), opts({ filter: 'DSPARK' }))), ['Alpha-Q4', '  dspark-Alpha']);
-  assert.equal(libraryRows(nestLibrary(lib), opts({ filter: 'dspark' }))[0].open, true);
+  const rows = libraryRows(nestLibrary(lib), opts({ filter: 'DSPARK' }));
+  assert.deepEqual(names(rows), ['Alpha-Q4', '  dspark-Alpha']);
+  assert.equal(rows[0].open, true);
+  assert.equal(rows[0].forcedOpen, true);
+  assert.equal(rows[1].parentName, 'Alpha-Q4');
+});
+
+test('a row held open by its companions is forced open, and ordinary rows are not', () => {
+  assert.deepEqual(libraryRows(nestLibrary(lib), opts()).map((r) => r.forcedOpen), [false, false, false]);
+});
+
+test('filtering does not match "null" in place of a missing arch', () => {
+  const lib2 = lib.map((m) => ({ ...m, arch: undefined }));
+  assert.deepEqual(libraryRows(nestLibrary(lib2), opts({ filter: 'null' })), []);
+  assert.deepEqual(libraryRows(nestLibrary(lib2), opts({ filter: 'undefined' })), []);
 });
 
 test('a filter matching the model keeps its companions behind the toggle', () => {
