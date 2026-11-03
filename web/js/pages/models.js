@@ -159,15 +159,34 @@ function LibraryCard({ data, reload, loading }) {
   const toggle = (path) => setExpanded((s) => { const n = new Set(s); n.has(path) ? n.delete(path) : n.add(path); return n; });
   const now = useNow(60000);
   const models = data ? data.models : [];
-  const rows = useMemo(() =>
-    libraryRows(grouped ? nestLibrary(models) : models.map((m) => ({ ...m, children: [] })), { sort, filter, expanded }),
-    [models, grouped, sort, filter, expanded]);
+  // Nest only when the models change or the view switches; sorting and filtering re-derive rows from the groups.
+  const groups = useMemo(() =>
+    grouped ? nestLibrary(models) : models.map((m) => ({ ...m, children: [] })),
+    [models, grouped]);
+  const rows = useMemo(() => libraryRows(groups, { sort, filter, expanded }),
+    [groups, sort, filter, expanded]);
   const total = models.reduce((a, m) => a + m.size, 0);
   const nCompanions = models.filter((m) => m.is_projector || m.is_draft).length;
   const description = !data ? 'Scanning…' : grouped
     ? `${fmtInt(models.length - nCompanions)} models · ${fmtInt(nCompanions)} companion files · ${fmtBytes(total)}`
     : `${fmtInt(models.length)} files · ${fmtBytes(total)}`;
   const loadedPaths = new Set(liveOf(status).map((i) => i.model_path));
+  // The sub-line under a model's name: its repo, plus the companion files. In the grouped view a model
+  // advertises only the files it owns; in the all-files view the companions listed on it (which may live
+  // under another model's row in the grouped view).
+  const subLine = (r) => {
+    const bits = [r.repo || r.path.split('/').slice(-2, -1)[0]];
+    if (r.depth === 0) {
+      if (grouped) {
+        if (r.children.some((c) => c.is_projector)) bits.push('+ vision projector');
+        for (const c of r.children) if (c.is_draft) bits.push(`+ ${DRAFT_LABEL[c.draft.type] || 'draft'} file`);
+      } else {
+        if (r.projectors && r.projectors.length) bits.push('+ vision projector');
+        for (const d of r.drafts || []) bits.push(`+ ${DRAFT_LABEL[d.type] || 'draft'} file`);
+      }
+    }
+    return bits.join(' · ');
+  };
 
   const remove = async () => {
     try { const r = await api.del('/api/models?path=' + encodeURIComponent(deleting.path)); toast({ title: `Deleted ${deleting.name}`, description: `${r.removed.length} file${r.removed.length === 1 ? '' : 's'} removed.` }); setDeleting(null); reload(); }
@@ -177,10 +196,11 @@ function LibraryCard({ data, reload, loading }) {
   const columns = [
     { key: 'name', header: 'Model', sortable: true, render: (r) => html`<div className=${r.depth ? 'lib-name lib-child' : 'lib-name'}>
       ${r.depth === 0 && r.childCount > 0 && html`<${E.IconButton} icon=${r.open ? 'chevron-down' : 'chevron-right'} size="sm"
-        label=${(r.open ? 'Hide' : 'Show') + ` the files that go with ${r.name}`} aria-expanded=${r.open} onClick=${() => toggle(r.path)} />`}
-      ${r.depth === 0 && r.childCount === 0 && html`<span className="lib-toggle-space" aria-hidden="true"></span>`}
+        label=${r.forcedOpen ? 'Files shown by the filter' : (r.open ? 'Hide' : 'Show') + ` the files that go with ${r.name}`}
+        aria-expanded=${r.open} disabled=${r.forcedOpen || undefined} onClick=${() => toggle(r.path)} />`}
+      ${grouped && r.depth === 0 && r.childCount === 0 && html`<span className="lib-toggle-space" aria-hidden="true"></span>`}
       <div className="cell-main">
-        <span className="row">${r.name}${loadedPaths.has(r.path) && html`<${E.Badge} size="sm" tone="success" live>Loaded<//>`}
+        <span className="row">${r.name}${r.depth === 1 && html`<span className="em-sr-only">, file for ${r.parentName}</span>`}${loadedPaths.has(r.path) && html`<${E.Badge} size="sm" tone="success" live>Loaded<//>`}
           ${r.is_projector && html`<${E.Badge} size="sm" tone="info">Vision projector<//>`}
           ${r.is_draft && html`<${E.Badge} size="sm" tone="info">${DRAFT_LABEL[r.draft.type] || 'Draft'} draft<//>`}
           ${r.decision && html`<${E.Badge} size="sm" tone="ember" title=${decisionNote(r.decision)}>Decision model<//>`}
@@ -188,9 +208,7 @@ function LibraryCard({ data, reload, loading }) {
           ${!r.is_projector && !r.is_draft && r.role_hint === 'rerank' && html`<${E.Badge} size="sm" tone="neutral">Reranker<//>`}
           ${r.nextn_layers > 0 && html`<${E.Badge} size="sm" tone="neutral" title="Has a multi-token prediction head">MTP<//>`}
           ${!r.complete && html`<${E.Badge} size="sm" tone="warning" icon="alert-triangle">Missing parts<//>`}</span>
-        <span className="cell-sub text-caption">${[r.repo || r.path.split('/').slice(-2, -1)[0],
-          ...(r.projectors && r.projectors.length ? ['+ vision projector'] : []),
-          ...((r.drafts || []).map((d) => `+ ${DRAFT_LABEL[d.type] || 'draft'} file`))].join(' · ')}</span>
+        <span className="cell-sub text-caption">${subLine(r)}</span>
       </div>
     </div>` },
     { key: 'quant', header: 'Quant', sortable: true },
