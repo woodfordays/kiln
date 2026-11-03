@@ -25,7 +25,8 @@ function tuneSummary(t) {
   const bits = [];
   if (b && isNum(b.decode0)) bits.push(`${fmtTps(b.decode0)} t/s decode`);
   if (b && isNum(b.prefillD)) bits.push(`${fmtInt(b.prefillD)} t/s prefill`);
-  const took = isNum(t.finished_at) && isNum(t.created_at) ? ` in ${fmtDuration(t.finished_at - t.created_at)}` : '';
+  const startedAt = t.started_at || t.created_at;
+  const took = isNum(t.finished_at) && isNum(startedAt) ? ` in ${fmtDuration(t.finished_at - startedAt)}` : '';
   return `${modelLabel(t.model)}: ${bits.join(', ')}. Saved as a preset${took}.`;
 }
 
@@ -49,6 +50,7 @@ export function useBackgroundNotifications({ toast, dismiss, go }) {
   };
 
   useEvent('tune', (t) => {
+    if (t.removed) return;  // a queued run was taken out of the queue
     const prev = tunes.current[t.id];
     tunes.current[t.id] = t.status;
     if (prev !== 'running' || t.status === 'running') return;
@@ -60,7 +62,10 @@ export function useBackgroundNotifications({ toast, dismiss, go }) {
       notify({ tone: 'danger', title: 'Tuning failed', description: t.error || 'The run stopped with an error.', duration: 0 },
         { tag: 'tune-' + t.id, page: 'tuner' });
     } else if (t.status === 'cancelled') {
-      notify({ title: 'Tuning cancelled', description: t.params && t.params.previous ? 'Restarting the server that was running before.' : undefined });
+      notify({ title: 'Tuning cancelled',
+        description: t.live && t.live.queued
+          ? 'The next queued run starts now.'
+          : (t.params && t.params.previous ? 'Restarting the server that was running before.' : undefined) });
     }
   });
 
