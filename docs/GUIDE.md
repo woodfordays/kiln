@@ -236,7 +236,6 @@ name expands and collapses its companions; the line under the name still says `+
 file`. Each row shows quantization, architecture and size class, trained context, size and the date it was added.
 
 ![Library](screenshots/models-library.png)
-![Library, expanded](screenshots/models-library-grouped.png)
 
 Sorting sorts the models; a model's companions stay under it. The filter matches name, repository and
 architecture — a model whose companions match but not itself shows opened, with just the matching companions,
