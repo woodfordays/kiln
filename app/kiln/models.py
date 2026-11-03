@@ -73,6 +73,22 @@ def _shared_prefix(a: str, b: str) -> int:
     return n
 
 
+_COMPANION_KIND = re.compile(r"^(?:mmproj|dspark|dflash|eagle3?|draft|mtp)[-_.](?=.)", re.I)
+
+
+def _companion_stem(name: str) -> str:
+    """The companion's name without a leading kind word (mmproj, dspark, …): what it should match against."""
+    return _COMPANION_KIND.sub("", name, count=1)
+
+
+def _owner(companion: dict, models: list[dict]) -> str | None:
+    """Path of the model in `models` whose name best matches the companion's, or None when there is no model."""
+    if not models:
+        return None
+    stem = _companion_stem(companion["name"])
+    return min(models, key=lambda m: (-_shared_prefix(stem, m["name"]), m["name"].lower()))["path"]
+
+
 def scan_roots() -> list[Path]:
     roots = [config.MODELS_DIR, config.DOWNLOAD_DIR, *config.EXTRA_SCAN_DIRS]
     out: list[Path] = []
@@ -138,6 +154,9 @@ def scan() -> list[dict]:
             e["projectors"] = [p["path"] for p in near]
             e["drafts"] = [{"path": d["path"], "name": d["name"], "size": d["size"], **d["draft"]}
                            for d in sorted(drafts, key=lambda d: -_shared_prefix(d["name"], e["name"]))]
+            e["companion_of"] = None
+        for c in projectors + drafts:
+            c["companion_of"] = _owner(c, entries)
         models.extend(entries + projectors + drafts)
     models.sort(key=lambda m: (m["is_projector"] or m["is_draft"], m["repo"].lower(), m["name"].lower()))
     return models
