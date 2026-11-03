@@ -230,10 +230,17 @@ For gated or private repositories, add a Hugging Face token in [Settings](#setti
 connection drops. Each row shows progress, speed and time left, with **Cancel**, **Retry** and **Remove from list**.
 Kiln refuses a download that won't fit on the disk, and says how much it needs.
 
-**Library.** Every GGUF file with its quantization, architecture and size class, trained context, size and the
-date it was added.
+**Library.** Models are listed with their companion files — vision projectors and draft files (DSpark, DFlash,
+EAGLE-3) — folded under them, so you can see at a glance which models you have. The chevron before a model's
+name expands and collapses its companions; the line under the name still says `+ vision projector · + DSpark
+file`. Each row shows quantization, architecture and size class, trained context, size and the date it was added.
 
 ![Library](screenshots/models-library.png)
+
+Sorting sorts the models; a model's companions stay under it. The filter matches name, repository and
+architecture — a model whose companions match but not itself shows opened, with just the matching companions,
+so typing `mmproj` lists every model that has a projector. The **Grouped / All files** control in the card
+header switches back to the flat list of every file, and the choice is remembered in this browser.
 
 Badges show what each file is: **Loaded** (a running model is using it), **Vision projector**, a **draft** file for
 speculative decoding, **Decision model**, **Embeddings**, **Reranker**, **MTP**, or **Missing parts** when a split

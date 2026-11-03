@@ -4,6 +4,7 @@ import {
   fmtInt, fmtBytes, fmtCompact, fmtDuration, fmtWhen, copyText, liveOf,
 } from '../lib.js';
 import { DRAFT_LABEL } from '../features.js';
+import { nestLibrary, libraryRows } from '../library.js';
 
 export function ModelsPage() {
   const library = useFetch('/api/models');
@@ -145,18 +146,47 @@ function decisionNote(d) {
   return 'Decision protocol ' + d.protocol + ' is not supported.';
 }
 
+const LIBRARY_GROUPED_KEY = 'kiln-library-grouped';
+
 function LibraryCard({ data, reload, loading }) {
   const { go, toast, fail, status } = useApp();
   const [deleting, setDeleting] = useState(null);
   const [filter, setFilter] = useState('');
+  const [sort, setSort] = useState({ key: 'mtime', direction: 'desc' });
+  const [expanded, setExpanded] = useState(() => new Set());
+  const [grouped, setGrouped] = useState(() => { try { return localStorage.getItem(LIBRARY_GROUPED_KEY) !== 'false'; } catch { return true; } });
+  useEffect(() => { try { localStorage.setItem(LIBRARY_GROUPED_KEY, String(grouped)); } catch {} }, [grouped]);
+  const toggle = (path) => setExpanded((s) => { const n = new Set(s); n.has(path) ? n.delete(path) : n.add(path); return n; });
   const now = useNow(60000);
   const models = data ? data.models : [];
-  const shown = useMemo(() => {
-    const f = filter.trim().toLowerCase();
-    return f ? models.filter((m) => (m.name + ' ' + m.repo + ' ' + m.arch).toLowerCase().includes(f)) : models;
-  }, [models, filter]);
+  // Nest only when the models change or the view switches; sorting and filtering re-derive rows from the groups.
+  const groups = useMemo(() =>
+    grouped ? nestLibrary(models) : models.map((m) => ({ ...m, children: [] })),
+    [models, grouped]);
+  const rows = useMemo(() => libraryRows(groups, { sort, filter, expanded }),
+    [groups, sort, filter, expanded]);
   const total = models.reduce((a, m) => a + m.size, 0);
+  const nCompanions = models.filter((m) => m.is_projector || m.is_draft).length;
+  const description = !data ? 'Scanning…' : grouped
+    ? `${fmtInt(models.length - nCompanions)} models · ${fmtInt(nCompanions)} companion files · ${fmtBytes(total)}`
+    : `${fmtInt(models.length)} files · ${fmtBytes(total)}`;
   const loadedPaths = new Set(liveOf(status).map((i) => i.model_path));
+  // The sub-line under a model's name: its repo, plus the companion files. In the grouped view a model
+  // advertises only the files it owns; in the all-files view the companions listed on it (which may live
+  // under another model's row in the grouped view).
+  const subLine = (r) => {
+    const bits = [r.repo || r.path.split('/').slice(-2, -1)[0]];
+    if (r.depth === 0) {
+      if (grouped) {
+        if (r.children.some((c) => c.is_projector)) bits.push('+ vision projector');
+        for (const c of r.children) if (c.is_draft) bits.push(`+ ${DRAFT_LABEL[c.draft.type] || 'draft'} file`);
+      } else {
+        if (r.projectors && r.projectors.length) bits.push('+ vision projector');
+        for (const d of r.drafts || []) bits.push(`+ ${DRAFT_LABEL[d.type] || 'draft'} file`);
+      }
+    }
+    return bits.join(' · ');
+  };
 
   const remove = async () => {
     try { const r = await api.del('/api/models?path=' + encodeURIComponent(deleting.path)); toast({ title: `Deleted ${deleting.name}`, description: `${r.removed.length} file${r.removed.length === 1 ? '' : 's'} removed.` }); setDeleting(null); reload(); }
@@ -164,18 +194,22 @@ function LibraryCard({ data, reload, loading }) {
   };
 
   const columns = [
-    { key: 'name', header: 'Model', sortable: true, render: (m) => html`<div className="cell-main">
-      <span className="row">${m.name}${loadedPaths.has(m.path) && html`<${E.Badge} size="sm" tone="success" live>Loaded<//>`}
-        ${m.is_projector && html`<${E.Badge} size="sm" tone="info">Vision projector<//>`}
-        ${m.is_draft && html`<${E.Badge} size="sm" tone="info">${DRAFT_LABEL[m.draft.type] || 'Draft'} draft<//>`}
-        ${m.decision && html`<${E.Badge} size="sm" tone="ember" title=${decisionNote(m.decision)}>Decision model<//>`}
-        ${!m.is_projector && !m.is_draft && m.role_hint === 'embedding' && html`<${E.Badge} size="sm" tone="neutral">Embeddings<//>`}
-        ${!m.is_projector && !m.is_draft && m.role_hint === 'rerank' && html`<${E.Badge} size="sm" tone="neutral">Reranker<//>`}
-        ${m.nextn_layers > 0 && html`<${E.Badge} size="sm" tone="neutral" title="Has a multi-token prediction head">MTP<//>`}
-        ${!m.complete && html`<${E.Badge} size="sm" tone="warning" icon="alert-triangle">Missing parts<//>`}</span>
-      <span className="cell-sub text-caption">${[m.repo || m.path.split('/').slice(-2, -1)[0],
-        ...(m.projectors && m.projectors.length ? ['+ vision projector'] : []),
-        ...((m.drafts || []).map((d) => `+ ${DRAFT_LABEL[d.type] || 'draft'} file`))].join(' · ')}</span>
+    { key: 'name', header: 'Model', sortable: true, render: (r) => html`<div className=${r.depth ? 'lib-name lib-child' : 'lib-name'}>
+      ${r.depth === 0 && r.childCount > 0 && html`<${E.IconButton} icon=${r.open ? 'chevron-down' : 'chevron-right'} size="sm"
+        label=${r.forcedOpen ? 'Files shown by the filter' : (r.open ? 'Hide' : 'Show') + ` the files that go with ${r.name}`}
+        aria-expanded=${r.open} disabled=${r.forcedOpen || undefined} onClick=${() => toggle(r.path)} />`}
+      ${grouped && r.depth === 0 && r.childCount === 0 && html`<span className="lib-toggle-space" aria-hidden="true"></span>`}
+      <div className="cell-main">
+        <span className="row">${r.name}${r.depth === 1 && html`<span className="em-sr-only">, file for ${r.parentName}</span>`}${loadedPaths.has(r.path) && html`<${E.Badge} size="sm" tone="success" live>Loaded<//>`}
+          ${r.is_projector && html`<${E.Badge} size="sm" tone="info">Vision projector<//>`}
+          ${r.is_draft && html`<${E.Badge} size="sm" tone="info">${DRAFT_LABEL[r.draft.type] || 'Draft'} draft<//>`}
+          ${r.decision && html`<${E.Badge} size="sm" tone="ember" title=${decisionNote(r.decision)}>Decision model<//>`}
+          ${!r.is_projector && !r.is_draft && r.role_hint === 'embedding' && html`<${E.Badge} size="sm" tone="neutral">Embeddings<//>`}
+          ${!r.is_projector && !r.is_draft && r.role_hint === 'rerank' && html`<${E.Badge} size="sm" tone="neutral">Reranker<//>`}
+          ${r.nextn_layers > 0 && html`<${E.Badge} size="sm" tone="neutral" title="Has a multi-token prediction head">MTP<//>`}
+          ${!r.complete && html`<${E.Badge} size="sm" tone="warning" icon="alert-triangle">Missing parts<//>`}</span>
+        <span className="cell-sub text-caption">${subLine(r)}</span>
+      </div>
     </div>` },
     { key: 'quant', header: 'Quant', sortable: true },
     { key: 'arch', header: 'Arch', sortable: true, render: (m) => [m.arch, m.size_label].filter(Boolean).join(' · ') || '–' },
@@ -188,12 +222,14 @@ function LibraryCard({ data, reload, loading }) {
       <${E.IconButton} icon="trash" size="sm" label=${'Delete ' + m.name} onClick=${() => setDeleting(m)} />
     </div>` },
   ];
-  return html`<${E.Card} title="Library" description=${data ? `${fmtInt(models.length)} files · ${fmtBytes(total)}` : 'Scanning…'} padding="none"
+  return html`<${E.Card} title="Library" description=${description} padding="none"
     actions=${html`<div className="card-actions">
+      <${E.SegmentedControl} size="sm" label="Library view" value=${grouped ? 'grouped' : 'flat'} onChange=${(v) => setGrouped(v === 'grouped')}
+        options=${[{ value: 'grouped', label: 'Grouped' }, { value: 'flat', label: 'All files' }]} />
       <${E.TextField} label="Filter models" hideLabel icon="search" size="sm" placeholder="Filter" value=${filter} onChange=${(e) => setFilter(e.target.value)} />
       <${E.IconButton} icon="refresh" size="sm" label="Rescan" onClick=${reload} disabled=${loading} />
     </div>`}>
-    <${E.Table} caption="Model library" columns=${columns} rows=${shown} rowKey=${(m) => m.path} defaultSort=${{ key: 'mtime', direction: 'desc' }}
+    <${E.Table} caption="Model library" columns=${columns} rows=${rows} rowKey=${(m) => m.path} sort=${sort} onSortChange=${setSort}
       empty=${data ? 'No GGUF files yet. Downloads land here when they finish.' : 'Scanning…'} />
     <${E.Dialog} open=${!!deleting} onClose=${() => setDeleting(null)} size="sm" title=${deleting ? `Delete ${deleting.name}?` : ''}
       description=${deleting ? `This removes ${fmtBytes(deleting.size)} from disk${deleting.files > 1 ? ` across ${deleting.files} files` : ''}. Presets that use it will fail to start until you download it again.` : ''}

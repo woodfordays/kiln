@@ -178,6 +178,9 @@ code, kbd { font-family: var(--font-mono); }
 .cell-main { display: flex; flex-direction: column; min-width: 0; }
 .cell-main > span:first-child { color: var(--ink); }
 .cell-sub { color: var(--ink-subtle); }
+.lib-name { display: flex; align-items: flex-start; gap: var(--space-2); min-width: 0; }
+.lib-toggle-space { flex: none; width: var(--control-sm); }
+.lib-child { margin-left: calc(var(--control-sm) / 2); padding-left: calc(var(--control-sm) / 2 + var(--space-2)); border-left: 2px solid var(--line); }
 .cell-key { display: inline-flex; align-items: center; gap: var(--space-2); }
 .pager { display: flex; align-items: center; justify-content: flex-end; gap: var(--space-2); color: var(--ink-muted); }
 .variant-pick { display: flex; align-items: center; gap: var(--space-3); }
