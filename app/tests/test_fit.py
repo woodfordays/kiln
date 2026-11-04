@@ -1,7 +1,8 @@
+import time
 import unittest
 from unittest import mock
 
-from kiln import fit
+from kiln import db, fit
 from . import ROOT
 from .helpers import llm, write_gguf
 
@@ -128,6 +129,23 @@ class CheckTests(unittest.TestCase):
             out = fit.check(self.path, rows(ctx=32768, ngl=0, fit="off"), "chat")
             self.assertFalse(out["fits"])
             self.assertIn("RAM", out["reason"])
+
+    def test_tuned_model_starts_despite_a_spill_too_big_for_the_free_ram(self):
+        r = rows(ctx=32768, ngl=0, fit="off")
+        with mock.patch.object(fit, "gpu_memory", return_value=self.mem(20000)), mock.patch.object(fit, "ram_available_mib", return_value=100):
+            self.assertFalse(fit.check(self.path, r, "chat")["fits"])  # the same spill, untuned, is refused
+        tid = db.insert("tunes", {"created_at": time.time(), "status": "done", "model": self.path, "params": "{}"})
+        self.addCleanup(lambda: db.execute("DELETE FROM tunes WHERE id=?", (tid,)))
+        with mock.patch.object(fit, "gpu_memory", return_value=self.mem(20000)), mock.patch.object(fit, "ram_available_mib", return_value=100):
+            out = fit.check(self.path, r, "chat")
+            self.assertTrue(out["fits"])
+            self.assertIn("tuning", out["reason"])
+
+    def test_a_failed_tune_does_not_skip_the_spill_check(self):
+        tid = db.insert("tunes", {"created_at": time.time(), "status": "failed", "model": self.path, "params": "{}", "error": "boom"})
+        self.addCleanup(lambda: db.execute("DELETE FROM tunes WHERE id=?", (tid,)))
+        with mock.patch.object(fit, "gpu_memory", return_value=self.mem(20000)), mock.patch.object(fit, "ram_available_mib", return_value=100):
+            self.assertFalse(fit.check(self.path, rows(ctx=32768, ngl=0, fit="off"), "chat")["fits"])
 
 
 def pad(path, mib):
