@@ -271,7 +271,7 @@ you need.
 | MTP | For models with an MTP head, also try self-speculative decoding with 1 to 5 draft tokens. |
 | Draft files | One switch for each kind of draft file next to the model (DSpark, DFlash, EAGLE-3, a plain draft model): also try it at a few draft lengths. A run with both an MTP head and a draft file measures both and keeps the faster. |
 | Preset name | Defaults to `<model> · <context> · tuned`. |
-| Start the winning preset when done | On: the winner starts when tuning ends. Off: the model that was running before comes back. |
+| Start the winning preset when done | On: the winner starts when the queue is empty. Off: the model that was running before comes back. |
 
 The form shows how many candidates to expect and a rough time. **The tuner stops the running models** while it
 works and the API port answers `503` in between. You get a notification when it finishes.
@@ -282,6 +282,13 @@ rest wait with the most they will run. A stage with nothing to try (flash attent
 quantized, say) is marked skipped. Some sizes sharpen as the run learns them: the grid's exact count appears once
 the KV types are chosen, and the thread stage shrinks once `-t` is. The stages are the ones listed in
 [TUNER.md](TUNER.md).
+
+**Queueing runs.** You can start another run while one is going: the form turns into **Queue another run** with an
+**Add to queue** button. Queued runs show in a **Queue** card — model, context, objective, search mode and a rough
+time estimate, in the order they will run — and each can be taken out with its ×. When the running run finishes
+(done, failed or cancelled), the next queued run starts on its own. **Cancel this run** cancels only the running
+one; **Cancel all** empties the queue and cancels it. The models that were running before the first run of the
+batch stop once and come back once, after the last one.
 
 **Results.** A winner card shows decode and prefill speed, draft acceptance and free VRAM, the command line it
 found, and buttons to open or start the preset. **Candidates** lists every trial with its stage, result, speeds and

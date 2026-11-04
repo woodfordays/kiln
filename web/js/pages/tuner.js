@@ -62,10 +62,16 @@ export function TunerPage() {
     setLive(list.data.live);
     if (selected == null && list.data.tunes.length) setSelected(list.data.tunes[0].id);
   }, [list.data]);
-  useEvent('tune', (t) => { setLive(t.live); setSelected(t.id); list.reload(); });
+  useEvent('tune', (t) => {
+    if (t.live) setLive(t.live);
+    if (!t.removed && t.status !== 'queued') setSelected(t.id);  // a run that is only queued doesn't take the page
+    list.reload();
+  });
 
   const running = live && live.running;
+  const queue = (list.data && list.data.queue) || [];
   const current = list.data && list.data.tunes.find((t) => t.id === selected);
+  const onStarted = (r) => { if (r.status === 'running') setSelected(r.id); list.reload(); };
 
   return html`<div className="page">
     <header className="page-head">
@@ -75,15 +81,46 @@ export function TunerPage() {
       </div>
     </header>
 
-    ${running ? html`<${RunningCard} tune=${current} live=${live} />` : html`<${TuneForm} status=${status} onStarted=${(id) => { setSelected(id); list.reload(); }} />`}
-    ${current && html`<${TuneResult} tune=${current} live=${running && live.tune_id === current.id ? live : null} />`}
+    ${running
+      ? html`<${RunningCard} tune=${current} live=${live} queued=${queue.length} />
+        ${queue.length ? html`<${QueueCard} queue=${queue} />` : null}
+        ${current && html`<${TuneResult} tune=${current} live=${live.tune_id === current.id ? live : null} />`}
+        <${TuneForm} status=${status} queueing onStarted=${onStarted} />`
+      : html`<${TuneForm} status=${status} onStarted=${onStarted} />
+        ${current && html`<${TuneResult} tune=${current} live=${null} />`}`}
     ${list.data && list.data.tunes.length > 1 && html`<${History} tunes=${list.data.tunes} selected=${selected} onSelect=${setSelected} />`}
   </div>`;
 }
 
+/* The queued runs: what will happen, in order, and how to take one out before its turn. */
+function QueueCard({ queue }) {
+  const { fail } = useApp();
+  const searchLabel = (t) => t.params.objective === 'context' ? 'Smallest spill' : t.params.mode === 'quick' ? 'One flag at a time' : 'Every combination';
+  const estimate = (t) => {
+    const [lo, hi] = estimateMinutes(countCandidates(t.params, { nextn_layers: t.params.has_mtp }), t.params.depth);
+    return lo ? `${lo}–${hi} min` : '–';
+  };
+  const columns = [
+    { key: 'pos', header: '#', numeric: true, render: (t, i) => i + 1 },
+    { key: 'model', header: 'Model', render: (t) => modelLabel(t.model) },
+    { key: 'ctx', header: 'Context', numeric: true, render: (t) => ctxLabel(t.params.ctx) },
+    { key: 'obj', header: 'Objective', render: (t) => (OBJECTIVES.find((o) => o.value === t.params.objective) || { label: t.params.objective }).label },
+    { key: 'search', header: 'Search', render: (t) => searchLabel(t) },
+    { key: 'est', header: 'Estimate', numeric: true, render: (t) => estimate(t) },
+    { key: 'remove', header: '', align: 'end', render: (t) => html`<${E.IconButton} icon="x" label="Remove from queue"
+      onClick=${() => api.del('/api/tune/' + t.id).catch((e) => fail(e, 'Could not remove the run from the queue'))} />` },
+  ];
+  return html`<${E.Card} title="Queue" padding="none"
+    description="Runs start in this order, each when the one before finishes. The models that were running come back after the last one."
+    actions=${html`<${E.Button} variant="ghost" icon="trash" onClick=${() => api.del('/api/tune/queue').catch((e) => fail(e, 'Could not clear the queue'))}>Clear queue<//>`}>
+    <${E.Table} caption="Queued tuning runs" density="compact" columns=${columns} rows=${queue} rowKey=${(t) => String(t.id)}
+      empty="Nothing is queued." />
+  <//>`;
+}
+
 /* ------------------------------------------------------------------ form */
 
-function TuneForm({ status, onStarted }) {
+function TuneForm({ status, queueing, onStarted }) {
   const { fail, toast } = useApp();
   const models = useFetch('/api/models');
   const presets = useFetch('/api/presets');
@@ -137,12 +174,16 @@ function TuneForm({ status, onStarted }) {
         base_preset_id: base ? Number(base) : null, name, start_after: startAfter,
         mode, kv_policy: kvPolicy, vary_batch: varyBatch, space: spaceSend,
       });
-      toast({ title: 'Tuning started', description: 'Each candidate loads the model, then runs the same benchmark. You will get a notification when it finishes.' });
-      onStarted(r.id);
+      if (queueing) {
+        toast({ title: 'Added to the queue', description: `Position ${r.position}. It starts when the run${r.position > 1 ? 's' : ''} before it finish${r.position > 1 ? '' : 'es'}.` });
+      } else {
+        toast({ title: 'Tuning started', description: 'Each candidate loads the model, then runs the same benchmark. You will get a notification when it finishes.' });
+      }
+      onStarted(r);
     } catch (e) { fail(e, 'Could not start tuning'); } finally { setBusy(false); }
   };
 
-  return html`<${E.Card} title="New tuning run" description="Same inputs, same candidates in the same order, same benchmark: greedy decoding with a fixed seed and the prompt cache off.">
+  return html`<${E.Card} title=${queueing ? 'Queue another run' : 'New tuning run'} description="Same inputs, same candidates in the same order, same benchmark: greedy decoding with a fixed seed and the prompt cache off.">
     <div className="stack">
       <div className="grid grid--2" style=${{ gap: 'var(--space-4)' }}>
         <${E.Select} label="Model" value=${model} onChange=${(e) => setModel(e.target.value)}
@@ -195,14 +236,14 @@ function TuneForm({ status, onStarted }) {
           <${E.Checkbox} label="Start the winning preset when done" checked=${startAfter} onChange=${(e) => setStartAfter(e.target.checked)} />
         </div>
       </div>
-      ${running && html`<${E.Alert} tone="warning" title=${liveOf(status).length > 1 ? 'The running models stop while tuning.' : 'The running model stops while tuning.'}>
+      ${!queueing && running && html`<${E.Alert} tone="warning" title=${liveOf(status).length > 1 ? 'The running models stop while tuning.' : 'The running model stops while tuning.'}>
         ${startAfter ? 'The winner starts when tuning finishes.' : 'It starts again when tuning finishes.'} The API port answers 503 in between.
       <//>`}
       <div className="row row--between">
         ${spaceError || tooMany
           ? html`<span className="text-caption space-error">${spaceError || 'too many: narrow it to at most 4,096'}</span>`
           : html`<span className="text-caption muted">Up to ${fmtInt(count)} candidates · roughly ${lo}–${hi} minutes</span>`}
-        <${E.Button} variant="primary" icon="play" loading=${busy} disabled=${!model || !!spaceError || tooMany} onClick=${start}>Start tuning<//>
+        <${E.Button} variant="primary" icon=${queueing ? 'plus' : 'play'} loading=${busy} disabled=${!model || !!spaceError || tooMany} onClick=${start}>${queueing ? 'Add to queue' : 'Start tuning'}<//>
       </div>
     </div>
   <//>`;
@@ -247,14 +288,19 @@ function DimRow({ d, s, onChange }) {
 
 /* ------------------------------------------------------------------ running + results */
 
-function RunningCard({ tune, live }) {
+function RunningCard({ tune, live, queued }) {
   const { fail } = useApp();
   const now = useNow(1000);
   const done = tune ? (tune.trials || []).length : 0;
   const est = tune ? countCandidates(tune.params, { nextn_layers: tune.params.has_mtp }) : 15;
+  const cancelOne = () => api.post('/api/tune/cancel').catch(fail);
+  // Empty the queue before cancelling: the cancelled run must not hand the GPU to the next one in between.
+  const cancelAll = async () => { try { await api.del('/api/tune/queue'); await api.post('/api/tune/cancel'); } catch (e) { fail(e, 'Could not cancel tuning'); } };
   return html`<${E.Card} title=${tune ? `Tuning ${modelLabel(tune.model)}` : 'Tuning'}
-    description=${tune ? `${ctxLabel(tune.params.ctx)} context · ${tune.params.objective} · running for ${fmtDuration(now - tune.created_at)}` : ''}
-    actions=${html`<${E.Button} variant="secondary" icon="x" onClick=${() => api.post('/api/tune/cancel').catch(fail)}>Cancel<//>`}>
+    description=${tune ? `${ctxLabel(tune.params.ctx)} context · ${tune.params.objective} · running for ${fmtDuration(now - (tune.started_at || tune.created_at))}` : ''}
+    actions=${queued > 0
+      ? html`<${E.Button} variant="secondary" icon="x" onClick=${cancelOne}>Cancel this run<//><${E.Button} variant="ghost" icon="trash" onClick=${cancelAll}>Cancel all<//>`
+      : html`<${E.Button} variant="secondary" icon="x" onClick=${cancelOne}>Cancel<//>`}>
     <div className="stack">
       <${E.Progress} label=${live.stage ? `${live.stage}: ${live.trial}` : 'Starting'} value=${Math.min(done, est)} max=${est}
         valueText=${`${done} measured`} />
@@ -364,7 +410,7 @@ function History({ tunes, selected, onSelect }) {
   const now = useNow(60000);
   const tone = { done: 'success', running: 'warning', failed: 'danger', cancelled: 'neutral', interrupted: 'neutral' };
   const columns = [
-    { key: 'created_at', header: 'Started', render: (t) => fmtWhen(t.created_at, now) },
+    { key: 'created_at', header: 'Started', render: (t) => fmtWhen(t.started_at || t.created_at, now) },  // queued runs have no started_at until they run
     { key: 'model', header: 'Model', render: (t) => modelLabel(t.model) },
     { key: 'ctx', header: 'Context', numeric: true, render: (t) => ctxLabel(t.params.ctx) },
     { key: 'obj', header: 'Objective', render: (t) => (OBJECTIVES.find((o) => o.value === t.params.objective) || { label: t.params.objective }).label },

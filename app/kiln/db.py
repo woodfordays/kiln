@@ -122,6 +122,10 @@ SCHEMA = [
     ALTER TABLE runs ADD COLUMN sig TEXT;
     ALTER TABLE requests ADD COLUMN swap_ms REAL;
     """,
+    # v4: tuning runs queue; started_at is when a run actually began (queued runs wait for it).
+    """
+    ALTER TABLE tunes ADD COLUMN started_at REAL;
+    """,
 ]
 
 _conn: sqlite3.Connection | None = None

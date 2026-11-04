@@ -41,7 +41,7 @@ own API behind Kiln's recording proxy and is not covered here, except for the
 | `400` | Bad input: missing field, unknown option, model file not found |
 | `401` | Missing or wrong credentials (only when auth is on) |
 | `404` | That preset, run, download or tuning run doesn't exist |
-| `409` | Busy or conflicting: server already running, tuner holds the server, name taken |
+| `409` | Busy or conflicting: server already running, name taken |
 | `500` | Unexpected server-side error |
 | `507` | Not enough disk space for a download |
 
@@ -127,7 +127,7 @@ or call it once and then follow [live events](#live-events).
     { "run_id": 31, "name": "qwen", "role": "chat", "state": "ready", "preset": { "id": 2, "name": "Qwen3 30B · 64K" },
       "model": "Qwen3-30B-A3B-Q4_K_M", "n_ctx": 65536, "error": null }
   ],
-  "tune": { "running": false, "tune_id": 7, "stage": "", "trial": "" },
+  "tune": { "running": false, "tune_id": 7, "stage": "", "trial": "", "queued": 0 },
   "downloads": { "active": 0 },
   "gpu": { "t": 1792031889.2, "busy": 97.0, "vram_used": 21474836480, "vram_total": 25753026560,
            "power_w": 241.0, "temp_c": 71.0, "sclk_mhz": 2480.0, "gpus": 1 },
@@ -174,7 +174,7 @@ is `ready` if any model is, else `loading`, `stopping`, `crashed` or `stopped`.
 | `autostart` | Starts when the container starts (set in Settings; several presets can). |
 | `last_used` | Last start time, `null` if never started. |
 
-**`tune`**: the tuner. `running` is `true` during a run, and then `server.blocked` is set too.
+**`tune`**: the tuner. `running` is `true` during a run, `queued` counts the runs waiting for the GPU, and then `server.blocked` is set too.
 `stage` and `trial` describe the current candidate, for example `"Grid"` and `"-ctk q8_0 -ctv q8_0 · -fa on · -ub 512 -b 2048 · no spec"`.
 The `live` object of the tuner endpoints and events also carries `plan` (see below); `/api/status` doesn't.
 
@@ -255,7 +255,7 @@ es.addEventListener('status', (e) => render(JSON.parse(e.data)));
 |---|---|---|
 | `status` | Full fleet status (as from `POST /api/server/start`), `instances` included | Any state change of any model |
 | `presets` | `{"changed": true}` | A preset was created, edited, duplicated, deleted, or saved by the tuner. Refetch `/api/quick`. |
-| `tune` | Tuning run row plus `live` (`{running, tune_id, stage, trial, plan}`) | Each tuner step, and once at the end with `status` set to `done`, `failed` or `cancelled` |
+| `tune` | Tuning run row plus `live` (`{running, tune_id, stage, trial, queued, plan}`), or `{id, removed: true}` when a queued run is taken out of the queue | Each tuner step, and once at the end with `status` set to `done`, `failed` or `cancelled` |
 | `tune_note` | `{"message": "..."}` | After tuning, if the previous server couldn't be restarted |
 | `download` | Download row (`id, repo, variant, status, done_bytes, total_bytes, speed, eta_s, error`), or `{id, removed: true}` | Queue changes and progress (up to twice a second). `status`: `queued`, `downloading`, `done`, `failed`, `cancelled` |
 | `idle_unload` | `{"run_id", "name", "idle_s"}` | Kiln is stopping a model because it was idle for the idle timeout. The `status` events that follow show it leaving `instances` |
@@ -521,9 +521,11 @@ with `enabled: false` stays in the preset but isn't passed to llama-server. Flag
 
 | Method | Path | Body / query | Returns |
 |---|---|---|---|
-| POST | `/api/tune` | `model`, `ctx`; `objective="decode"` (`decode`, `balanced`, `prefill`, `context`), `depth=8192`, `speculative=true`, `drafts=null` (paths of draft files to try; by default the nearest file of each kind next to the model, or none when `speculative` is `false`), `base_preset_id=null`, `headroom_mib=512`, `name=""`, `start_after=false`, `mode="grid"` (`grid`, `quick`), `kv_policy="precise"` (`precise`, `all`), `vary_batch=false` | `{id}`. `409` if a run is in progress. |
+| POST | `/api/tune` | `model`, `ctx`; `objective="decode"` (`decode`, `balanced`, `prefill`, `context`), `depth=8192`, `speculative=true`, `drafts=null` (paths of draft files to try; by default the nearest file of each kind next to the model, or none when `speculative` is `false`), `base_preset_id=null`, `headroom_mib=512`, `name=""`, `start_after=false`, `mode="grid"` (`grid`, `quick`), `kv_policy="precise"` (`precise`, `all`), `vary_batch=false` | `{id, status, position}`: starts the run when nothing is running (`status: "running"`, `position: 0`), otherwise queues it first in, first out (`status: "queued"`, `position` its 1-based place). Validation errors are still `400`, at the moment of queueing. |
 | POST | `/api/tune/cancel` | | `{ok}` |
-| GET | `/api/tune` | `?limit=20` | `{live, tunes}`: recent runs with params, trials, best, status. `live.plan` is the ordered list of stages of the run in progress (empty otherwise): `{id, label, stages, max}`, where `stages` are the `stage` names its trials carry and `max` is the most trials it will measure, or `null` while that isn't known. |
+| DELETE | `/api/tune/queue` | | `{removed}`: the number of queued runs taken out |
+| DELETE | `/api/tune/{id}` | | `{ok}` for a queued run. `404` if unknown, `409` if it isn't queued (cancel the running one instead). |
+| GET | `/api/tune` | `?limit=20` | `{live, queue, tunes}`: queued runs in start order, then recent runs (queued ones excluded) with params, trials, best, status. `live.plan` is the ordered list of stages of the run in progress (empty otherwise): `{id, label, stages, max}`, where `stages` are the `stage` names its trials carry and `max` is the most trials it will measure, or `null` while that isn't known. |
 | GET | `/api/tune/{id}` | | One run, plus `live` if it's the current one |
 
 ### Stats and requests

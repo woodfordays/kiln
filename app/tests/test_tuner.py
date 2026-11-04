@@ -1,6 +1,7 @@
 """The tuner against the fake llama-server, whose /completion speeds depend on the command line:
 decode is fastest at -t 8 (it reports 12 as its own default), prompt processing grows with -tb, and
 speculative decoding helps most with a DSpark draft file at length 7 (see tests/fake_llama.py)."""
+import asyncio
 import json
 import os
 import shutil
@@ -9,7 +10,10 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from kiln import db, tunespace, tuner as tuner_mod
+import httpx
+
+from kiln import api, db, tunespace, tuner as tuner_mod
+from kiln.server import manager
 from kiln.tuner import tuner, get_tune
 from . import ROOT
 from .helpers import llm, write_gguf
@@ -32,6 +36,9 @@ class Case(unittest.IsolatedAsyncioTestCase):
                   mock.patch.dict(os.environ, {"FAKE_LOAD_S": "0"})):
             p.start()
             self.addCleanup(p.stop)
+        tuner._paused = False
+        tuner._batch = None
+        manager.blocked = None
 
     async def tune(self, model, **params) -> dict:
         tid = await tuner.start({"ctx": 4096, "depth": 1024, **params, "model": model})
@@ -284,7 +291,7 @@ class PlanTests(Case):
         self.assertEqual([e["stages"] for e in plan if e["id"].startswith("spec:")], [["Speculative (MTP)"], ["Speculative (DSpark)"]])
         self.assertEqual(tuner.plan, [])
         self.assertEqual(tuner.live()["plan"], [])
-        self.assertEqual(set(tuner.live()), {"running", "tune_id", "stage", "trial", "plan"})
+        self.assertEqual(set(tuner.live()), {"running", "tune_id", "stage", "trial", "plan", "queued"})
         self.assertNotIn("plan", tuner.status())  # /api/status stays as it was
 
     async def test_every_stage_a_run_reports_is_in_its_plan(self):
@@ -295,6 +302,136 @@ class PlanTests(Case):
         model = llm(DIR / "plan-cover" / "spill" / "moe-Q4.gguf", arch="qwen35moe", layers=8, **{"qwen35moe.expert_count": 8})
         t, snaps = await self.watch(model, objective="context")
         self.assertLessEqual({x["stage"] for x in t["trials"]}, {name for e in snaps[0][1] for name in e["stages"]})
+
+
+class QueueTests(Case):
+    """Runs started while one is going wait in a queue and run in order."""
+
+    def params(self, name, **kw):
+        return {"ctx": 4096, "depth": 1024, "mode": "quick", "speculative": False,
+                "model": llm(DIR / "queue" / name / f"{name}-Q4.gguf"), **kw}
+
+    async def test_a_run_started_while_one_is_going_is_queued_and_runs_after_it(self):
+        a = await tuner.start(self.params("a"))
+        b = await tuner.start(self.params("b"))
+        self.assertEqual((get_tune(a)["status"], get_tune(b)["status"]), ("running", "queued"))
+        self.assertEqual(tuner.status()["queued"], 1)
+        await tuner.wait_idle()
+        ta, tb = get_tune(a), get_tune(b)
+        self.assertEqual((ta["status"], tb["status"]), ("done", "done"), tb.get("error"))
+        self.assertLessEqual(ta["finished_at"], tb["started_at"])
+        self.assertEqual(tuner.status()["queued"], 0)
+        self.assertIsNone(manager.blocked)
+
+    async def test_two_starts_at_once_run_one_after_the_other(self):
+        a, b = await asyncio.gather(tuner.start(self.params("a")), tuner.start(self.params("b")))
+        self.assertEqual(sorted([get_tune(a)["status"], get_tune(b)["status"]]), ["queued", "running"])
+        await tuner.wait_idle()
+        self.assertEqual({get_tune(a)["status"], get_tune(b)["status"]}, {"done"})
+
+    async def test_a_bad_request_is_refused_when_queued_not_later(self):
+        await tuner.start(self.params("a"))
+        with self.assertRaisesRegex(ValueError, "at least 512"):
+            await tuner.start(self.params("b", ctx=100))
+        self.assertEqual(tuner.status()["queued"], 0)
+        await tuner.wait_idle()
+
+    async def test_cancel_stops_the_running_run_and_the_queue_goes_on(self):
+        a = await tuner.start(self.params("a"))
+        b = await tuner.start(self.params("b"))
+        await tuner.cancel()
+        await tuner.wait_idle()
+        self.assertEqual((get_tune(a)["status"], get_tune(b)["status"]), ("cancelled", "done"))
+
+    async def test_queued_runs_can_be_removed_one_or_all(self):
+        a = await tuner.start(self.params("a"))
+        b = await tuner.start(self.params("b"))
+        c = await tuner.start(self.params("c"))
+        tuner.remove(b)
+        self.assertIsNone(get_tune(b))
+        with self.assertRaisesRegex(RuntimeError, "Only a queued run"):
+            tuner.remove(a)
+        with self.assertRaises(LookupError):
+            tuner.remove(9999)
+        self.assertEqual(tuner.clear_queue(), 1)
+        self.assertIsNone(get_tune(c))
+        await tuner.wait_idle()
+        self.assertEqual(get_tune(a)["status"], "done")
+
+    async def test_what_was_running_comes_back_once_after_the_whole_queue(self):
+        snap = [{"model": "/m/chat.gguf", "rows": [], "env": {}, "preset_id": None, "role": "chat"}]
+        with mock.patch.object(manager, "snapshot", return_value=snap), \
+             mock.patch.object(manager, "stop", new=mock.AsyncMock()) as stop, \
+             mock.patch.object(manager, "restore", new=mock.AsyncMock(return_value=[])) as restore:
+            await tuner.start(self.params("a"))
+            b = await tuner.start(self.params("b"))
+            await tuner.wait_idle()
+        stop.assert_awaited_once()
+        restore.assert_awaited_once_with(snap)
+        self.assertEqual(get_tune(b)["params"]["previous"], snap)
+
+    async def test_each_winner_that_asked_to_start_starts_when_the_queue_empties(self):
+        with mock.patch.object(manager, "start", new=mock.AsyncMock()) as start, \
+             mock.patch.object(manager, "restore", new=mock.AsyncMock(return_value=[])):
+            a = await tuner.start(self.params("a", start_after=True))
+            await tuner.start(self.params("b"))  # didn't ask
+            c = await tuner.start(self.params("c", start_after=True))
+            await tuner.wait_idle()
+        self.assertEqual([call.args[0] for call in start.await_args_list],
+                         [get_tune(a)["model"], get_tune(c)["model"]])
+
+    async def test_a_queued_run_whose_model_was_deleted_fails_and_the_queue_goes_on(self):
+        await tuner.start(self.params("a"))
+        gone = self.params("gone")
+        b = await tuner.start(gone)
+        c = await tuner.start(self.params("c"))
+        os.remove(gone["model"])
+        await tuner.wait_idle()
+        self.assertEqual(get_tune(b)["status"], "failed")
+        self.assertIn("Model file not found", get_tune(b)["error"])
+        self.assertEqual(get_tune(c)["status"], "done")
+
+    async def test_shutdown_leaves_the_queue_for_the_next_boot(self):
+        a = await tuner.start(self.params("a"))
+        b = await tuner.start(self.params("b"))
+        await tuner.shutdown()
+        self.assertEqual((get_tune(a)["status"], get_tune(b)["status"]), ("cancelled", "queued"))
+        await tuner.resume()
+        await tuner.wait_idle()
+        self.assertEqual(get_tune(b)["status"], "done")
+
+
+class QueueApiTests(Case):
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        self.http = httpx.AsyncClient(transport=httpx.ASGITransport(app=api.app), base_url="http://kiln", timeout=60)
+        self.addAsyncCleanup(self.http.aclose)
+        self.addAsyncCleanup(tuner.wait_idle)
+
+    def body(self, name):
+        return {"ctx": 4096, "depth": 1024, "mode": "quick", "speculative": False,
+                "model": llm(DIR / "queue-api" / name / f"{name}-Q4.gguf")}
+
+    async def test_queueing_listing_and_removing_over_http(self):
+        r1 = (await self.http.post("/api/tune", json=self.body("a"))).json()
+        r2 = (await self.http.post("/api/tune", json=self.body("b"))).json()
+        r3 = (await self.http.post("/api/tune", json=self.body("c"))).json()
+        self.assertEqual([(r["status"], r["position"]) for r in (r1, r2, r3)], [("running", 0), ("queued", 1), ("queued", 2)])
+        listing = (await self.http.get("/api/tune")).json()
+        self.assertEqual([t["id"] for t in listing["queue"]], [r2["id"], r3["id"]])
+        self.assertNotIn(r2["id"], [t["id"] for t in listing["tunes"]])
+        self.assertEqual(listing["live"]["queued"], 2)
+        self.assertEqual((await self.http.delete(f"/api/tune/{r1['id']}")).status_code, 409)
+        self.assertEqual((await self.http.delete("/api/tune/424242")).status_code, 404)
+        self.assertEqual((await self.http.delete(f"/api/tune/{r2['id']}")).json(), {"ok": True})
+        self.assertEqual((await self.http.delete("/api/tune/queue")).json(), {"removed": 1})
+        self.assertEqual((await self.http.get("/api/tune")).json()["queue"], [])
+
+    async def test_a_bad_request_is_a_400_and_queues_nothing(self):
+        await self.http.post("/api/tune", json=self.body("a"))
+        r = await self.http.post("/api/tune", json={**self.body("b"), "ctx": 100})
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual((await self.http.get("/api/tune")).json()["queue"], [])
 
 
 class SearchSpaceRunTests(Case):
