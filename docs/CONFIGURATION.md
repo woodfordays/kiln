@@ -10,6 +10,7 @@ presets, history) are in the Settings page and stored in the database.
 |---|---|---|
 | `KILN_BACKEND` | `vulkan` | `vulkan` (AMD/Intel) or `cuda` (NVIDIA). Also the image tag, `kiln:<backend>`. |
 | `COMPOSE_FILE` | `docker-compose.yml:compose.amd.yml` | Adds the GPU passthrough for the backend. |
+| `COMPOSE_PATH_SEPARATOR` | `:` | How Compose splits `COMPOSE_FILE`. Windows splits on `;` by default, so this keeps one `.env` working everywhere. |
 | `CUDA_VERSION` | `12.8.1` | CUDA toolkit for the image; the host driver must support it. |
 | `CUDA_ARCHITECTURES` | `default` | GPU architectures to compile, e.g. `89` or `86;89`. `default` = all (slow build). |
 | `MODELS_DIR` | `/opt/models` | Host folder mounted at `/models`. The HF cache is read from `<MODELS_DIR>/hf`; downloads go to `<MODELS_DIR>/gguf/<org>/<repo>/`. |
