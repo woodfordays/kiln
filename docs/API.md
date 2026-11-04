@@ -532,14 +532,14 @@ with `enabled: false` stays in the preset but isn't passed to llama-server. Flag
 
 | Method | Path | Query | Returns |
 |---|---|---|---|
-| GET | `/api/stats/summary` | `range`, `model` | `{current, previous, trend}`: totals and token-weighted speeds, the same for the period before (for deltas), and a 12-point trend |
+| GET | `/api/stats/summary` | `range`, `model` | `{current, previous, trend}`: totals and token-weighted speeds, the same for the period before (for deltas), and a 12-point trend. Token totals: `prompt_n` (prefilled), `cache_n` (reused from the prompt cache), `read_n` (their sum: every prompt token read) and `predicted_n` (generated); trend points carry `read_n` and `predicted_n` |
 | GET | `/api/stats/timeseries` | `range`, `model` | Bucketed decode/prefill speed, tokens, requests |
 | GET | `/api/stats/scatter` | `range`, `model` | Decode speed vs context depth points |
-| GET | `/api/stats/models` | `range` | Per-model table |
-| GET | `/api/stats/lifetime` | | All-time totals |
+| GET | `/api/stats/models` | `range` | Per-model table, with the same fields as `summary`'s `current` |
+| GET | `/api/stats/lifetime` | | All-time totals, `read_n` included |
 | GET | `/api/stats/slots` | | `{model: slot}`: each model's fixed chart color (1–6, all-time top six) |
 | POST | `/api/stats/reset` | body `{confirm: true}` | `{deleted}`. Deletes all request and GPU history. |
-| GET | `/api/requests` | `limit=50` (max 500), `offset=0`, `model`, `status` (`ok`, `errors`) | `{total, rows}` |
+| GET | `/api/requests` | `limit=50` (max 500), `offset=0`, `model`, `status` (`ok`, `errors`) | `{total, rows}`. Each row also has `read_n`: `prompt_n` + `cache_n`, or `null` when llama-server sent no timings |
 | GET | `/api/requests.csv` | `range=all`, `model` | CSV download |
 | GET | `/api/gpu/live` | | `{available, name, samples}` (last 10 min at 2 s) |
 | GET | `/api/gpu/history` | `range` | 1-minute GPU averages |

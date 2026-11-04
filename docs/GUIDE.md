@@ -97,8 +97,10 @@ total generation time), so a two-token reply counts for less than a two-thousand
 Per-request rates skip generations shorter than 8 tokens, which are too noisy to mean anything. The change
 shown next to the number compares with the previous period of the same length.
 
-**Stat cards.** Requests, tokens generated, prefill speed and median time to first token, each with its change
-against the previous period and a small trend line. *Time to first token* is the first content event for
+**Stat cards.** Requests, tokens read, tokens generated, prefill speed and median time to first token, each with
+its change against the previous period and a small trend line. *Tokens read* is every prompt token the models read:
+the ones they prefilled plus the ones reused from the prompt cache, so long conversations and big documents show up
+even when the replies are short. *Time to first token* is the first content event for
 streaming requests; for others it is wall time minus decode time, plus one token. Time spent waiting for a model
 to be loaded is kept out of it and shown separately.
 
@@ -112,8 +114,9 @@ to be loaded is kept out of it and shown separately.
   KV cache, cached plus new prompt tokens. This is the quickest way to see how much a model slows down as the
   conversation grows.
 
-**Below the charts:** a per-model table, the last eight requests, a live GPU card (VRAM, busy, power, junction
-temperature, and ten minutes of history) and **All-time totals**, which ignore the filter.
+**Below the charts:** a per-model table (requests, tokens read and generated, speeds), the last eight requests, a
+live GPU card (VRAM, busy, power, junction temperature, and ten minutes of history) and **All-time totals**, which
+ignore the filter. There, tokens read is split into prefilled and from cache.
 
 ![Models table, recent requests, GPU and totals](screenshots/overview-models.png)
 
@@ -340,7 +343,7 @@ Every request through the API port, newest first, 50 per page. Filter by result 
 
 | Column | Meaning |
 |---|---|
-| Prompt, Cached, Generated | New prompt tokens, tokens reused from the prompt cache, and tokens generated. |
+| Read, Cached, Generated | Every prompt token the request read (point at it to see how many were prefilled and how many came from the cache), the part reused from the prompt cache, and tokens generated. |
 | Prefill t/s, Decode t/s | llama-server's own rates for the request. |
 | Model load | Time the request waited for its model to be loaded, when it had to be. Not counted in TTFT. |
 | TTFT, Total | Time to first token and wall time. |

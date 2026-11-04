@@ -81,6 +81,7 @@ def _agg(t0: float, t1: float, model: str | None) -> dict:
         "errors": r["errors"] or 0,
         "prompt_n": r["prompt_n"] or 0,
         "cache_n": r["cache_n"] or 0,
+        "read_n": (r["prompt_n"] or 0) + (r["cache_n"] or 0),  # every prompt token read: prefilled or from the cache
         "predicted_n": r["predicted_n"] or 0,
         "gen_tps": (r["gen_tok"] / r["gen_ms"] * 1000) if r["gen_ms"] else None,
         "pp_tps": (r["pp_tok"] / r["pp_ms"] * 1000) if r["pp_ms"] else None,
@@ -150,6 +151,7 @@ def summary(rng: str, model: str | None) -> dict:
         w, p = _where(a, a + trend_bucket, model)
         r = db.row(
             f"""SELECT COUNT(*) requests, SUM(COALESCE(predicted_n,0)) predicted_n,
+                SUM(COALESCE(prompt_n,0) + COALESCE(cache_n,0)) read_n,
                 SUM(CASE WHEN prompt_n > 0 AND prompt_ms > 0 THEN prompt_n END) pp_tok,
                 SUM(CASE WHEN prompt_n > 0 AND prompt_ms > 0 THEN prompt_ms END) pp_ms,
                 SUM(CASE WHEN predicted_n > 0 AND predicted_ms > 0 THEN predicted_n END) gen_tok,
@@ -160,6 +162,7 @@ def summary(rng: str, model: str | None) -> dict:
             "t": a,
             "requests": r["requests"] or 0,
             "predicted_n": r["predicted_n"] or 0,
+            "read_n": r["read_n"] or 0,
             "pp_tps": (r["pp_tok"] / r["pp_ms"] * 1000) if r["pp_ms"] else None,
             "gen_tps": (r["gen_tok"] / r["gen_ms"] * 1000) if r["gen_ms"] else None,
             "ttft_p50": pct(ttft, 0.5),
@@ -221,6 +224,7 @@ def lifetime() -> dict:
         FROM runs""", (now,))
     dl = db.row("SELECT COUNT(*) n, SUM(total_bytes) bytes FROM downloads WHERE status='done'")
     return {**{k: (v or 0) if k != "first_ts" else v for k, v in r.items()},
+            "read_n": (r["prompt_n"] or 0) + (r["cache_n"] or 0),
             "runs": runs["runs"] or 0, "loads": runs["loads"] or 0, "avg_load_ms": runs["load_ms"],
             "uptime_s": runs["uptime_s"] or 0, "downloads": dl["n"] or 0, "downloaded_bytes": dl["bytes"] or 0}
 

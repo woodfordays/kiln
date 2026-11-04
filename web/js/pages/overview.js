@@ -179,9 +179,11 @@ function StatRow({ s, range }) {
   const labels = s.trend.map((t) => fmtDateTime(t.t));
   const trend = (k) => s.trend.map((t) => (isNum(t[k]) ? t[k] : 0));
   const dl = p ? PREV_WORDS[range] : undefined;
-  return html`<div className="grid grid--4">
+  return html`<div className="grid grid--5">
     <${E.StatCard} label="Requests" value=${fmtCompact(c.requests)} delta=${p ? delta(c.requests, p.requests) : undefined} deltaLabel=${dl}
       trend=${trend('requests')} trendLabels=${labels} formatValue=${fmtInt} />
+    <${E.StatCard} label="Tokens read" value=${fmtCompact(c.read_n)} delta=${p ? delta(c.read_n, p.read_n) : undefined} deltaLabel=${dl}
+      trend=${trend('read_n')} trendLabels=${labels} formatValue=${fmtInt} />
     <${E.StatCard} label="Tokens generated" value=${fmtCompact(c.predicted_n)} delta=${p ? delta(c.predicted_n, p.predicted_n) : undefined} deltaLabel=${dl}
       trend=${trend('predicted_n')} trendLabels=${labels} formatValue=${fmtInt} />
     <${E.StatCard} label="Prefill speed" value=${fmtTps(c.pp_tps)} unit="t/s" delta=${p ? delta(c.pp_tps, p.pp_tps) : undefined} deltaLabel=${dl}
@@ -276,6 +278,7 @@ function ModelsCard({ rows, range }) {
   const columns = [
     { key: 'model', header: 'Model', render: (r) => html`<span className="cell-key"><span className="chart-key chart-key--dot" style=${{ '--key': seriesColor(r.slot) }}></span><span className="truncate" style=${{ maxWidth: 260 }} title=${r.model}>${r.model || 'Unknown'}</span></span>` },
     { key: 'requests', header: 'Requests', numeric: true, sortable: true, render: (r) => fmtInt(r.requests) },
+    { key: 'read_n', header: 'Read', numeric: true, sortable: true, render: (r) => fmtCompact(r.read_n) },
     { key: 'predicted_n', header: 'Generated', numeric: true, sortable: true, render: (r) => fmtCompact(r.predicted_n) },
     { key: 'gen_tps', header: 'Decode t/s', numeric: true, sortable: true, render: (r) => fmtTps(r.gen_tps) },
     { key: 'pp_tps', header: 'Prefill t/s', numeric: true, sortable: true, render: (r) => fmtTps(r.pp_tps) },
@@ -330,7 +333,8 @@ function RecentCard({ data }) {
   const columns = [
     { key: 'ts', header: 'When', render: (r) => html`<span className="nowrap">${fmtWhen(r.ts, now)}</span>` },
     { key: 'endpoint', header: 'Endpoint', mono: true },
-    { key: 'prompt_n', header: 'Prompt', numeric: true, render: (r) => fmtInt(r.prompt_n) },
+    { key: 'read_n', header: 'Read', numeric: true, render: (r) => (isNum(r.read_n)
+      ? html`<span title=${`${fmtInt(r.prompt_n || 0)} prefilled · ${fmtInt(r.cache_n || 0)} from cache`}>${fmtInt(r.read_n)}</span>` : '–') },
     { key: 'predicted_n', header: 'Generated', numeric: true, render: (r) => fmtInt(r.predicted_n) },
     { key: 'predicted_tps', header: 'Decode t/s', numeric: true, render: (r) => fmtTps(r.predicted_tps) },
     { key: 'status', header: 'Status', render: (r) => html`<${RequestStatus} r=${r} />` },
@@ -353,8 +357,9 @@ function LifetimeCard({ data }) {
   return html`<${E.Card} title="All-time totals" description=${d && d.first_ts ? 'Recording since ' + fmtDateTime(d.first_ts) + '.' : 'Kept until you reset them in Settings.'}>
     ${d && html`<dl className="facts facts--tight">
       ${item('Requests', fmtInt(d.requests))}
+      ${item('Tokens read', fmtCompact(d.read_n))}
       ${item('Tokens generated', fmtCompact(d.predicted_n))}
-      ${item('Prompt tokens', fmtCompact(d.prompt_n))}
+      ${item('Prefilled', fmtCompact(d.prompt_n))}
       ${item('From cache', fmtCompact(d.cache_n))}
       ${item('Generating', fmtDuration(d.gen_ms / 1000))}
       ${item('Prefilling', fmtDuration(d.pp_ms / 1000))}

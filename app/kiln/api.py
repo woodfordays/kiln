@@ -597,6 +597,8 @@ async def requests_list(limit: int = 50, offset: int = 0, model: str | None = No
     w = " AND ".join(where)
     total = db.scalar(f"SELECT COUNT(*) FROM requests WHERE {w}", params)
     rows = db.rows(f"SELECT * FROM requests WHERE {w} ORDER BY id DESC LIMIT ? OFFSET ?", [*params, min(limit, 500), offset])
+    for r in rows:  # every prompt token read, prefilled or from the cache; None when llama-server sent no timings
+        r["read_n"] = None if r["prompt_n"] is None and r["cache_n"] is None else (r["prompt_n"] or 0) + (r["cache_n"] or 0)
     return {"total": total, "rows": rows}
 
 
