@@ -24,6 +24,7 @@ docker compose logs -f kiln       # Kiln's output (llama-server's is in the Serv
 
 | Symptom | Cause and fix |
 |---|---|
+| On Windows, `docker compose` says the compose file `docker-compose.yml:compose.amd.yml` set by `COMPOSE_FILE` is invalid. | Compose on Windows splits `COMPOSE_FILE` on `;`. Add `COMPOSE_PATH_SEPARATOR=:` to `.env` (newer `.env.example` files have it). |
 | The browser can't connect to `:8090`. | Check `docker compose ps`. If the container is restarting, read `docker compose logs kiln`. Ports are `KILN_UI_PORT` (control panel) and `KILN_API_PORT` (API) in `.env`; if something else holds them, change them and run `docker compose up -d`. |
 | Works on the host but not from another machine. | `KILN_BIND` is `127.0.0.1`. Set it to `0.0.0.0` (the default) to publish on every interface, and check the host's firewall. |
 | The browser asks for a login. | `KILN_UI_PASSWORD` is set. The user is `kiln`, the password is that value. Scripts and the browser extension can use `KILN_API_TOKEN` instead (see [Access control](CONFIGURATION.md#access-control)). |

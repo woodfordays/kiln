@@ -1,6 +1,7 @@
 # Shared settings. GPU access lives in one override per vendor, picked by COMPOSE_FILE in .env:
 #   AMD / Intel (Vulkan):  COMPOSE_FILE=docker-compose.yml:compose.amd.yml
 #   NVIDIA (CUDA):         COMPOSE_FILE=docker-compose.yml:compose.nvidia.yml
+# .env also sets COMPOSE_PATH_SEPARATOR=: so the ":" works on Windows (Compose's default there is ";").
 # scripts/setup-env.sh detects the GPU and writes this for you.
 services:
   kiln:
