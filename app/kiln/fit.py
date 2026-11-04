@@ -278,9 +278,16 @@ def measured_mib(sig: str) -> int | None:
     return db.scalar("SELECT gpu_mib FROM runs WHERE sig=? AND gpu_mib IS NOT NULL ORDER BY id DESC LIMIT 1", (sig,))
 
 
+def is_tuned(model: str) -> bool:
+    """Whether the model has a completed tuning run: the tuner measured it on this machine,
+    so a spill to system RAM that looks too big for the free RAM starts without a confirmation."""
+    return db.scalar("SELECT 1 FROM tunes WHERE model=? AND status='done' LIMIT 1", (model,)) is not None
+
+
 def check(model: str, rows: list[dict], role: str, reclaim_mib: int = 0, reserved_mib: int = 0) -> dict:
     """Would this launch fit, counting `reclaim_mib` freed by models that would be stopped first and
-    setting aside `reserved_mib` that models still loading have yet to take?"""
+    setting aside `reserved_mib` that models still loading have yet to take? A model that has been
+    through tuning is exempt from the spill to system RAM check: the tuner already proved it runs."""
     est = estimate(model, rows, role)
     sig = signature(model, rows, role)
     measured = measured_mib(sig)
@@ -301,7 +308,13 @@ def check(model: str, rows: list[dict], role: str, reclaim_mib: int = 0, reserve
             out["reason"] = (f"Needs about {need / 1024:.1f} GiB of VRAM plus {MARGIN_MIB} MiB to spare, "
                              f"and {free / 1024:.1f} GiB is free.")
     if out["fits"] is not False and ram is not None and est["ram_mib"] > max(0, ram - 1024):
-        out["fits"] = False
-        out["reason"] = (f"Needs about {est['ram_mib'] / 1024:.1f} GiB of system RAM for the weights and cache that "
-                         f"stay off the GPU, and {ram / 1024:.1f} GiB is available.")
+        if is_tuned(model):
+            out["fits"] = True
+            out["reason"] = (f"Spills about {est['ram_mib'] / 1024:.1f} GiB to system RAM, more than the "
+                             f"{ram / 1024:.1f} GiB that is available, but this model has been through tuning, "
+                             f"so it starts without a confirmation.")
+        else:
+            out["fits"] = False
+            out["reason"] = (f"Needs about {est['ram_mib'] / 1024:.1f} GiB of system RAM for the weights and cache that "
+                             f"stay off the GPU, and {ram / 1024:.1f} GiB is available.")
     return out

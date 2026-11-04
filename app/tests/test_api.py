@@ -1,5 +1,6 @@
 import contextlib
 import json
+import time
 import unittest
 import unittest.mock
 
@@ -118,6 +119,22 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ok.status_code, 200, ok.text)
         await self.wait(ok.json()["started"]["run_id"])
         self.assertEqual([i.name for i in manager.live()], ["beta"])
+
+    async def test_tuned_model_spilling_to_ram_starts_without_a_confirmation(self):
+        # VRAM has plenty of room, but the spill to system RAM is bigger than the free RAM
+        self.stack.enter_context(unittest.mock.patch.object(fit, "gpu_memory", return_value={"total_mib": 24000, "free_mib": 24000, "used_mib": 0}))
+        self.stack.enter_context(unittest.mock.patch.object(fit, "estimate",
+                                                           return_value={"gpu_mib": 6000, "ram_mib": 8000, "adaptive": False, "context": 4096, "parts": {}}))
+        self.stack.enter_context(unittest.mock.patch.object(fit, "ram_available_mib", return_value=2000))
+        p = await self.preset("Spilled")
+        r = await self.start(p["id"])
+        self.assertEqual(r.status_code, 409)  # the same launch, untuned, asks for a confirmation
+        self.assertEqual(r.json()["code"], "no_fit")
+        tid = db.insert("tunes", {"created_at": time.time(), "status": "done", "model": p["model"], "params": "{}"})
+        self.addCleanup(lambda: db.execute("DELETE FROM tunes WHERE id=?", (tid,)))
+        ok = await self.start(p["id"])
+        self.assertEqual(ok.status_code, 200, ok.text)  # through tuning, so it starts straight away
+        await self.wait(ok.json()["started"]["run_id"])
 
     async def test_breakdown_and_slots(self):
         self.stack.enter_context(unittest.mock.patch.object(fit, "gpu_memory", return_value={"total_mib": 24000, "free_mib": 24000, "used_mib": 0}))
