@@ -117,16 +117,25 @@ More screens (requests, settings, the model library, the tuner's candidate table
 docker compose up -d --build           # first build compiles llama.cpp
 ```
 
-`setup-env.sh` picks the backend from the hardware: NVIDIA (`nvidia-smi` works) gets CUDA,
-everything else gets Vulkan. It also sets `COMPOSE_FILE` to add the matching GPU passthrough
-(`compose.nvidia.yml` or `compose.amd.yml`), and on NVIDIA it compiles only for the GPUs in that
-box (`CUDA_ARCHITECTURES`, e.g. `89` for an RTX 4090). Force a choice with
+`setup-env.sh` picks the backend from the hardware: NVIDIA (`nvidia-smi` works) gets CUDA, an AMD card
+under Docker Desktop for Windows gets ROCm, and everything else gets Vulkan. It also sets `COMPOSE_FILE` to
+add the matching GPU passthrough (`compose.nvidia.yml`, `compose.wsl.yml` or `compose.amd.yml`), and on
+NVIDIA and ROCm it compiles only for the GPUs in that box (`CUDA_ARCHITECTURES`, e.g. `89` for an RTX 4090;
+`ROCM_ARCHITECTURES`, e.g. `gfx1100` for an RX 7900). Force a choice with
 `KILN_BACKEND=vulkan ./scripts/setup-env.sh`; Vulkan also runs on NVIDIA if you want to compare.
 
 | Backend | Base image | First build | Host needs |
 |---|---|---|---|
 | Vulkan | Ubuntu 26.04 + Mesa RADV | about 5 min, 786 MB image | `/dev/dri` (any recent kernel) |
 | CUDA | `nvidia/cuda:12.8.1` (Ubuntu 24.04) | 10–20 min for one architecture | NVIDIA driver 570+, NVIDIA Container Toolkit |
+| ROCm | Ubuntu 24.04 + ROCm 7.2.4 + librocdxg | about 10 min for one architecture, 2.9 GB image | Windows 11, Docker Desktop (WSL2), a Radeon that ROCm supports on WSL |
+
+**Windows.** Install Docker Desktop and run the scripts from Git Bash. Docker Desktop's VM has no `/dev/dri`, but
+AMD's ROCm runtime for WSL (librocdxg) reaches the GPU through `/dev/dxg`, so on an AMD card `setup-env.sh`
+picks `KILN_BACKEND=rocm` and `compose.wsl.yml`. That covers the RX 7900 and 7800, RX 9060 and 9070, Radeon PRO
+W7700–W7900 and R9700, Ryzen AI 300 and Ryzen AI Max (AMD's
+[list](https://github.com/ROCm/librocdxg#wsl-compatibility-matrix)); only the RX 7900 XTX has been tried. Any
+other GPU under Docker Desktop (including macOS) runs llama.cpp on the CPU, and CUDA on Docker Desktop is untested.
 
 Then open:
 

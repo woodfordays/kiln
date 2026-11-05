@@ -1,0 +1,14 @@
+# Docker Desktop on Windows (WSL2) with an AMD GPU: ROCm through Direct3D's /dev/dxg, with KILN_BACKEND=rocm.
+# The VM has no /dev/kfd or /dev/dri. The image's librocdxg reaches the GPU through /dev/dxg and Microsoft's
+# libdxcore.so from /usr/lib/wsl/lib. scripts/setup-env.sh picks this file.
+services:
+  kiln:
+    devices:
+      - /dev/dxg:/dev/dxg
+    volumes:
+      - /usr/lib/wsl:/usr/lib/wsl:ro
+    environment:
+      # libdxcore.so lives in /usr/lib/wsl/lib. /app/llama stays first, as in the image.
+      LD_LIBRARY_PATH: /app/llama:/usr/lib/wsl/lib
+      # ROCm releases before 7.13 look for /dev/dxg only when asked.
+      HSA_ENABLE_DXG_DETECTION: "1"

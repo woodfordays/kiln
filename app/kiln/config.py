@@ -45,7 +45,7 @@ LLAMA_SERVER = _find_llama_server()
 # never mixes with llama.cpp's.
 AUDIOCPP_SERVER = _find_audiocpp_server()
 AUDIOCPP_LIB_DIR = _env("KILN_AUDIOCPP_LIB_DIR", str(Path(AUDIOCPP_SERVER).parent))
-# Which GPU backend audio.cpp should use when a preset doesn't say ("vulkan", "cuda" or "cpu").
+# Which GPU backend audio.cpp should use when a preset doesn't say ("vulkan", "cuda", "rocm" or "cpu").
 BACKEND = _env("KILN_BACKEND", "vulkan")
 
 UI_HOST = _env("KILN_UI_HOST", "0.0.0.0")
