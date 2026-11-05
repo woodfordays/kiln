@@ -62,12 +62,16 @@ Why a child process instead of a sibling container driven over the Docker socket
 mount (that is root on the host), one image to build, and the controller sees stdout directly
 for logs and crash detection.
 
-### Backends: Vulkan (AMD/Intel) and CUDA (NVIDIA)
+### Backends: Vulkan (AMD/Intel), CUDA (NVIDIA) and ROCm (AMD on Windows)
 
-One Dockerfile builds either backend from `KILN_BACKEND`; the vendor-specific GPU passthrough is a
-compose override (`compose.amd.yml`, `compose.nvidia.yml`) chosen by `COMPOSE_FILE`. The CUDA image is
-built on `nvidia/cuda:12.8.1` and gets the GPU through the NVIDIA Container Toolkit. The Vulkan
-details follow.
+One Dockerfile builds any backend from `KILN_BACKEND`; the vendor-specific GPU passthrough is a
+compose override (`compose.amd.yml`, `compose.nvidia.yml`, `compose.wsl.yml`) chosen by `COMPOSE_FILE`. The CUDA
+image is built on `nvidia/cuda:12.8.1` and gets the GPU through the NVIDIA Container Toolkit. The ROCm image is
+for Docker Desktop on Windows, whose WSL2 VM has no `/dev/dri` or `/dev/kfd`: llama.cpp and audio.cpp are built
+with HIP on `rocm/dev-ubuntu-24.04`, and the runtime is Ubuntu 24.04 with AMD's ROCm packages (kernels trimmed to
+`ROCM_ARCHITECTURES`) plus librocdxg, which reaches the GPU through `/dev/dxg`. Vulkan through Mesa's Dozen
+(Vulkan on Direct3D 12) was tried there first; it worked but was 2–4× slower, and AMD's D3D12 shader compiler
+crashed on some of llama.cpp's kernels. The Vulkan details follow.
 
 
 The image compiles llama.cpp from source with `-DGGML_VULKAN=ON` on Ubuntu 26.04 and runs it

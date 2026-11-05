@@ -1,6 +1,7 @@
 # Shared settings. GPU access lives in one override per vendor, picked by COMPOSE_FILE in .env:
 #   AMD / Intel (Vulkan):  COMPOSE_FILE=docker-compose.yml:compose.amd.yml
 #   NVIDIA (CUDA):         COMPOSE_FILE=docker-compose.yml:compose.nvidia.yml
+#   AMD on Docker Desktop for Windows (ROCm):  KILN_BACKEND=rocm, COMPOSE_FILE=docker-compose.yml:compose.wsl.yml
 # .env also sets COMPOSE_PATH_SEPARATOR=: so the ":" works on Windows (Compose's default there is ";").
 # scripts/setup-env.sh detects the GPU and writes this for you.
 services:
@@ -13,6 +14,7 @@ services:
         AUDIO_CPP_REF: ${AUDIO_CPP_REF:-0097d365a00b52a6991ad7618f0a04e8d2935e47}
         CUDA_VERSION: ${CUDA_VERSION:-12.8.1}
         CUDA_ARCHITECTURES: ${CUDA_ARCHITECTURES:-default}
+        ROCM_ARCHITECTURES: ${ROCM_ARCHITECTURES:-default}
     image: kiln:${KILN_BACKEND:-vulkan}
     container_name: kiln
     restart: unless-stopped

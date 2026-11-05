@@ -1,7 +1,8 @@
-# Kiln: llama.cpp + audio.cpp + web control panel. One Dockerfile, two GPU backends:
+# Kiln: llama.cpp + audio.cpp + web control panel. One Dockerfile, three GPU backends:
 #
 #   KILN_BACKEND=vulkan   AMD (and Intel) GPUs through Mesa RADV/ANV   (default)
 #   KILN_BACKEND=cuda     NVIDIA GPUs through CUDA
+#   KILN_BACKEND=rocm     AMD GPUs through ROCm, on Docker Desktop for Windows (WSL2, /dev/dxg)
 #
 #   docker compose build                      # args come from .env (scripts/setup-env.sh)
 #   docker compose build --build-arg LLAMA_CPP_REF=b11200
@@ -13,6 +14,14 @@ ARG NODE_VERSION=24
 # CUDA images: the host driver must support this CUDA version (12.8 needs driver 570+).
 ARG CUDA_VERSION=12.8.1
 ARG CUDA_UBUNTU_VERSION=24.04
+# ROCm images. librocdxg is AMD's ROCm runtime for WSL (it reaches the GPU through /dev/dxg); its
+# release has to match the ROCm version (github.com/ROCm/librocdxg, "WSL Compatibility Matrix").
+ARG ROCM_VERSION=7.2.4
+ARG ROCM_UBUNTU_VERSION=24.04
+ARG ROCDXG_VERSION=1.2.2
+ARG ROCDXG_SHA256=28ded1254811192ebace1f76c0227580184af7b27ab2475fb9728295a702d541
+# The GPUs ROCm supports on WSL: RX 7900/W7900/W7800, RX 7800/W7700, Ryzen AI 300, Ryzen AI Max, RX 9060, RX 9070/R9700.
+ARG ROCM_WSL_ARCHITECTURES="gfx1100;gfx1101;gfx1150;gfx1151;gfx1200;gfx1201"
 
 # ---------------------------------------------------------------- llama.cpp source
 FROM docker.io/ubuntu:${UBUNTU_VERSION} AS src
@@ -90,6 +99,29 @@ RUN mkdir -p /out \
     && cp build/bin/llama-server build/bin/llama-bench build/bin/llama-cli /out/ \
     && find build -name "*.so*" -exec cp -P {} /out/ \;
 
+# ---------------------------------------------------------------- build: ROCm
+FROM docker.io/rocm/dev-ubuntu-${ROCM_UBUNTU_VERSION}:${ROCM_VERSION} AS rocm-dev
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential cmake git ca-certificates libssl-dev hipblas-dev rocblas-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+FROM rocm-dev AS build-rocm
+# GPU architectures to compile for, e.g. "gfx1100" (RX 7900). "default" = every GPU ROCm supports on WSL.
+ARG ROCM_ARCHITECTURES=default
+ARG ROCM_WSL_ARCHITECTURES
+COPY --from=src /src /src
+COPY --from=webui /ui/dist /src/tools/ui/dist
+WORKDIR /src
+RUN TARGETS="${ROCM_ARCHITECTURES}"; if [ "${TARGETS}" = default ]; then TARGETS="${ROCM_WSL_ARCHITECTURES}"; fi \
+    && HIPCXX="$(hipconfig -l)/clang" HIP_PATH="$(hipconfig -R)" cmake -B build -DCMAKE_BUILD_TYPE=Release \
+        -DGGML_HIP=ON -DGPU_TARGETS="${TARGETS}" \
+        -DGGML_NATIVE=OFF -DGGML_BACKEND_DL=ON -DGGML_CPU_ALL_VARIANTS=ON \
+        -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF \
+    && cmake --build build --config Release -j"$(nproc)"
+RUN mkdir -p /out \
+    && cp build/bin/llama-server build/bin/llama-bench build/bin/llama-cli /out/ \
+    && find build -name "*.so*" -exec cp -P {} /out/ \;
+
 # ---------------------------------------------------------------- build: audio.cpp, Vulkan
 FROM docker.io/ubuntu:${UBUNTU_VERSION} AS audiocpp-build-vulkan
 ARG AUDIO_CPP_REF
@@ -141,6 +173,32 @@ RUN if [ "${AUDIO_CPP_REF}" = "none" ]; then mkdir -p /out; else \
     && cp -r model_specs /out/; \
     fi
 
+# ---------------------------------------------------------------- build: audio.cpp, ROCm
+FROM rocm-dev AS audiocpp-build-rocm
+ARG AUDIO_CPP_REF
+ARG ROCM_ARCHITECTURES=default
+ARG ROCM_WSL_ARCHITECTURES
+COPY --from=audiocpp-src /src /src
+WORKDIR /src
+# Not the all-CPU-variants build here: that loads backends as plug-ins, and Fish Audio's HIP sampler calls into
+# the HIP backend directly, which then doesn't link. The CPU code is the portable baseline instead, and the
+# static HIP backend has to be position-independent to link into the server.
+RUN if [ "${AUDIO_CPP_REF}" = "none" ]; then mkdir -p /out; else \
+      TARGETS="${ROCM_ARCHITECTURES}"; if [ "${TARGETS}" = default ]; then TARGETS="${ROCM_WSL_ARCHITECTURES}"; fi \
+    && HIPCXX="$(hipconfig -l)/clang" HIP_PATH="$(hipconfig -R)" cmake -B build -DCMAKE_BUILD_TYPE=Release \
+        -DAUDIOCPP_MODEL_SET=full \
+        -DENGINE_ENABLE_NATIVE_CPU=OFF -DENGINE_ENABLE_CPU_ALL_VARIANTS=OFF \
+        -DENGINE_ENABLE_OPENMP=ON -DAUDIOCPP_DEPLOYMENT_BUILD=ON \
+        -DENGINE_BUILD_EXAMPLES=OFF -DENGINE_BUILD_TESTS=OFF -DENGINE_BUILD_WARMBENCH=OFF \
+        -DENGINE_ENABLE_HIP=ON -DENGINE_ENABLE_CUDA=OFF -DENGINE_ENABLE_VULKAN=OFF -DGPU_TARGETS="${TARGETS}" \
+        -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+    && cmake --build build --parallel "$(nproc)" --target audiocpp_server \
+    && mkdir -p /out \
+    && cp build/bin/audiocpp_server /out/ \
+    && find build -name "*.so*" -exec cp -P {} /out/ \; \
+    && cp -r model_specs /out/; \
+    fi
+
 # ---------------------------------------------------------------- runtime bases
 FROM docker.io/ubuntu:${UBUNTU_VERSION} AS base-vulkan
 # libespeak-ng1: audio.cpp's Kokoro (and Piper) turn text into phonemes with eSpeak-ng, loaded at run time.
@@ -158,6 +216,38 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # The NVIDIA container toolkit mounts the driver and nvidia-smi (used for GPU telemetry).
 ENV NVIDIA_VISIBLE_DEVICES=all NVIDIA_DRIVER_CAPABILITIES=compute,utility \
     CUDA_CACHE_PATH=/data/cache/cuda
+
+FROM docker.io/ubuntu:${ROCM_UBUNTU_VERSION} AS base-rocm
+ARG ROCM_VERSION
+ARG ROCDXG_VERSION
+ARG ROCDXG_SHA256
+ARG ROCM_ARCHITECTURES=default
+ARG ROCM_WSL_ARCHITECTURES
+# AMD's apt repository for the ROCm runtime (hipBLAS pulls in rocBLAS, rocSOLVER, hipBLASLt and the HIP runtime),
+# then librocdxg, the ROCm runtime's way to the GPU under WSL (after ROCm, so /opt/rocm is ROCm's symlink).
+# rocBLAS and hipBLASLt ship GPU kernels for every architecture (about 5 GB, mostly datacenter GPUs): keep only
+# the ones this image was built for, in the same layer so the rest never lands in the image.
+RUN TARGETS="${ROCM_ARCHITECTURES}"; if [ "${TARGETS}" = default ]; then TARGETS="${ROCM_WSL_ARCHITECTURES}"; fi \
+    && apt-get update && apt-get install -y --no-install-recommends curl ca-certificates gnupg \
+    && mkdir -p /etc/apt/keyrings \
+    && curl -fsSL https://repo.radeon.com/rocm/rocm.gpg.key | gpg --dearmor -o /etc/apt/keyrings/rocm.gpg \
+    && . /etc/os-release \
+    && echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/rocm.gpg] https://repo.radeon.com/rocm/apt/${ROCM_VERSION} ${VERSION_CODENAME} main" \
+        > /etc/apt/sources.list.d/rocm.list \
+    && printf 'Package: *\nPin: release o=repo.radeon.com\nPin-Priority: 600\n' > /etc/apt/preferences.d/rocm-pin-600 \
+    && curl -fsSL -o /tmp/rocdxg.deb \
+        "https://github.com/ROCm/librocdxg/releases/download/v${ROCDXG_VERSION}/rocdxg-roct_${ROCDXG_VERSION}_amd64.deb" \
+    && echo "${ROCDXG_SHA256}  /tmp/rocdxg.deb" | sha256sum -c - \
+    && apt-get update && apt-get install -y --no-install-recommends \
+        hipblas libgomp1 libssl3t64 python3 python3-venv libespeak-ng1 espeak-ng-data \
+    && apt-get install -y --no-install-recommends /tmp/rocdxg.deb \
+    && test -L /opt/rocm \
+    && KEEP="$(echo "${TARGETS}" | tr ';' '|')" \
+    && find /opt/rocm/lib/rocblas/library /opt/rocm/lib/hipblaslt/library -type f -name '*gfx*' \
+        | grep -vE "(${KEEP})([^0-9a-z]|$)" | xargs -r rm -f \
+    && du -sh /opt/rocm/lib/rocblas/library /opt/rocm/lib/hipblaslt/library \
+    && rm -rf /var/lib/apt/lists/* /tmp/rocdxg.deb
+ENV PATH=/opt/rocm/bin:${PATH}
 
 FROM build-${KILN_BACKEND} AS llama
 FROM audiocpp-build-${KILN_BACKEND} AS audiocpp

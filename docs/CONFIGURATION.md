@@ -8,11 +8,12 @@ presets, history) are in the Settings page and stored in the database.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `KILN_BACKEND` | `vulkan` | `vulkan` (AMD/Intel) or `cuda` (NVIDIA). Also the image tag, `kiln:<backend>`. |
-| `COMPOSE_FILE` | `docker-compose.yml:compose.amd.yml` | Adds the GPU passthrough for the backend. |
+| `KILN_BACKEND` | `vulkan` | `vulkan` (AMD/Intel), `cuda` (NVIDIA) or `rocm` (AMD under Docker Desktop for Windows). Also the image tag, `kiln:<backend>`. |
+| `COMPOSE_FILE` | `docker-compose.yml:compose.amd.yml` | Adds the GPU passthrough for the backend: `compose.amd.yml`, `compose.nvidia.yml` or `compose.wsl.yml` (ROCm on Windows). `docker-compose.yml` alone runs on the CPU, which is what Docker Desktop gets without a supported AMD card. |
 | `COMPOSE_PATH_SEPARATOR` | `:` | How Compose splits `COMPOSE_FILE`. Windows splits on `;` by default, so this keeps one `.env` working everywhere. |
 | `CUDA_VERSION` | `12.8.1` | CUDA toolkit for the image; the host driver must support it. |
 | `CUDA_ARCHITECTURES` | `default` | GPU architectures to compile, e.g. `89` or `86;89`. `default` = all (slow build). |
+| `ROCM_ARCHITECTURES` | `default` | ROCm only: GPU architectures to compile and keep kernels for, e.g. `gfx1100` (RX 7900). `default` = every GPU ROCm supports on WSL (slower build, bigger image). |
 | `MODELS_DIR` | `/opt/models` | Host folder mounted at `/models`. The HF cache is read from `<MODELS_DIR>/hf`; downloads go to `<MODELS_DIR>/gguf/<org>/<repo>/`. |
 | `KILN_UID`, `KILN_GID` | `1000` | The container runs as you, so downloaded files belong to you. |
 | `VIDEO_GID`, `RENDER_GID` | `44`, `993` | AMD only: host groups that own `/dev/dri` (`getent group video render`). |
@@ -64,6 +65,21 @@ Kiln has two ports, and they are protected differently.
   knobs such as `RADV_PERFTEST=…` or `GGML_VK_VISIBLE_DEVICES=0`.
 - RADV's shader cache is kept in `./data/cache/mesa`, so only the first load after a rebuild pays
   for shader compilation.
+
+**AMD on Windows (ROCm, Docker Desktop)**
+- Docker Desktop's WSL2 VM has no `/dev/dri` or `/dev/kfd`. The `rocm` image adds librocdxg, AMD's ROCm
+  runtime for WSL, which reaches the GPU through `/dev/dxg`. `compose.wsl.yml` passes `/dev/dxg` in, mounts
+  `/usr/lib/wsl` (for Microsoft's `libdxcore.so`) and sets `LD_LIBRARY_PATH` and `HSA_ENABLE_DXG_DETECTION=1`
+  (ROCm releases before 7.13 need it).
+- ROCm 7.2.4 and librocdxg 1.2.2 are pinned together in the `Dockerfile` (`ROCM_VERSION`, `ROCDXG_VERSION`):
+  a librocdxg release supports specific ROCm versions, so change them together.
+- The image keeps rocBLAS and hipBLASLt kernels only for `ROCM_ARCHITECTURES`. After moving to a different card,
+  run `setup-env.sh` again and rebuild.
+- llama.cpp lists the card as `ROCm0`. Integrated GPUs ROCm doesn't support (such as a Ryzen 7000's) aren't listed.
+- Measured on an RX 7900 XTX (prompt / generation, tokens per second): Qwen3 1.7B Q4_K_M 12,600 / 269,
+  granite 3.1 3B-A800M (MoE) 9,700 / 224, Llama 3.2 1B Q8_0 19,700 / 313. The CPU (Ryzen 9 7950X3D) managed
+  555 / 32, 486 / 54 and 542 / 29.
+- No GPU telemetry yet: the VM has no amdgpu sysfs, so the dashboard has no GPU readings and Kiln can't check VRAM.
 
 **NVIDIA (CUDA)**
 - GPU telemetry comes from `nvidia-smi`, which the container toolkit mounts in. On multi-GPU

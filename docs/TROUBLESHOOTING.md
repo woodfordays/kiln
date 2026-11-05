@@ -46,6 +46,20 @@ readings come from. The Overview GPU card says "No GPU telemetry" when Kiln can'
 - GPU readings come from amdgpu sysfs, so they are only available for AMD cards. Intel GPUs work through
   Vulkan too, but the dashboard has no telemetry for them.
 
+**Docker Desktop (Windows, macOS)**
+
+- `docker compose up` fails with `error gathering device information while adding custom device "/dev/dri"`:
+  Docker Desktop runs containers in a VM with no `/dev/dri`. Run `./scripts/setup-env.sh` again (from Git Bash
+  on Windows). With a supported AMD card on Windows it picks `KILN_BACKEND=rocm` and `compose.wsl.yml`;
+  otherwise it leaves the GPU out (`COMPOSE_FILE=docker-compose.yml`) and llama.cpp runs on the CPU.
+- On Windows, *Devices* says "None detected" with `KILN_BACKEND=rocm`:
+  - Docker Desktop has to use the WSL2 backend (Settings → General); the Hyper-V backend has no `/dev/dxg`.
+  - `COMPOSE_FILE` must include `compose.wsl.yml`: it passes `/dev/dxg` and `/usr/lib/wsl` in and sets
+    `HSA_ENABLE_DXG_DETECTION=1`. `docker compose exec kiln rocminfo` should list your card as an agent.
+  - The card must be one ROCm supports on WSL, and the image must have been built for it
+    (`ROCM_ARCHITECTURES`; run `setup-env.sh` again and `docker compose up -d --build` after changing cards).
+  - Update the AMD Windows driver (Adrenalin); librocdxg relies on a recent one.
+
 **NVIDIA (CUDA)**
 
 - `COMPOSE_FILE` must include `compose.nvidia.yml`, and the host needs the NVIDIA Container Toolkit
